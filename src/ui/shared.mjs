@@ -15,7 +15,20 @@ export const STATUS = new Map([
 ]);
 export const list = v => Array.isArray(v) ? v : [];
 export const str = v => v == null ? '' : String(v);
-export const statusOf = item => STATUS.has(item.status) ? item.status : 'unknown';
+export const statusOf = item => STATUS.has(item?.status) ? item.status : 'unknown';
+export const matchesFilter = (task, filter) => !filter || list(task.items).some(i => statusOf(i) === filter);
+// A mixed historical record never looks complete just because one part finished.
+const statusPriority = ['input-required','handoff','clarify','running','dispatching','queued','unknown','failed','waiting','new','done'];
+export function recordStatus(task) {
+  const states = new Set(list(task.items).map(statusOf));
+  return statusPriority.find(s=>states.has(s)) || 'unknown';
+}
+export function recordCaption(task) {
+  const value = str(task.text || list(task.items)[0]?.text).replace(/\s+/gu, ' ').trim();
+  const chars = Array.from(value);
+  return chars.length>100 ? chars.slice(0,100).join('')+'…' : value || '未命名任务';
+}
+export { candidateAt } from '../core/record-policy.mjs';
 export const pairKey = (a, b) => JSON.stringify([a, b]);
 export const shortDir = p => p.split(/[\\/]/).filter(Boolean).at(-1) || p;
 export function absoluteDir(p) {

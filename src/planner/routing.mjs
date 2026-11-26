@@ -1,5 +1,7 @@
 // This module only reasons about supplied metadata. In particular it never resolves
 // a path on the client (which need not be the same machine as the DSH host).
+import {workEvidence} from './grammar.mjs';
+
 export const TIERS = ['fast', 'standard', 'deep'];
 const basename = s => s?.split(/[\\/]/u).filter(Boolean).at(-1) ?? '';
 const esc = s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -112,7 +114,7 @@ export function scopeFor(text, cat) {
     if(cat.roots.size===1 && actionable(text) && projectWork(text)) return {paths:[...cat.roots.keys()],deictic:true};
     return {paths:[],error:'尚未指明“这个项目”是哪一个；请点名已选项目或精确目录'};
   }
-  if (matched.size>1) return {paths:[...matched],error:'这项同时指向多个已选目录；请选一个目标，或把各项目的工作分别列出'};
+  if (matched.size>1) return {paths:[...matched],error:'整段请求同时指向多个已选目录；请为这条消息选择唯一的目标目录'};
   return {paths:[...matched]};
 }
 
@@ -187,26 +189,34 @@ function differentObject(a,b) {
 }
 export function similarity(request, source, cat) {
   if(!source || !request) return {strong:false,score:0};
-  const a=normal(request,cat),b=normal(source,cat), fa=family(a),fb=family(b), agree=fa && fa===fb;
+  const {visible,opaque}=workEvidence(request),{visible:prior,opaque:other}=workEvidence(source);
+  // Hiding code/quoted examples must not make two DIFFERENT payloads look
+  // like the same job merely because both say “fix this sample”.
+  if (opaque.length && other.length && (opaque.length!==other.length || opaque.some((s,i)=>s!==other[i]))) return {strong:false,score:0};
+  const a=normal(visible,cat),b=normal(prior,cat), fa=family(a),fb=family(b), agree=fa && fa===fb;
   const ag=grams(a),bg=grams(b),overlap=joint(ag,bg), subject=overlap.filter(g=>!genericGrams.has(g));
-  const af=facts(request),bf=facts(source),tickets=joint(af.ticket,bf.ticket),files=joint(af.file,bf.file),codes=joint(af.status,bf.status);
-  if (compareFacts(af,bf) || differentObject(a,b) || (fa && fb && fa!==fb) || /不同(?:功能|目标|任务)|另一(?:件事|个问题|个需求|项工作)|不(?:是|接着)上次/u.test(request)) return {strong:false,score:0};
+  const af=facts(visible),bf=facts(prior),tickets=joint(af.ticket,bf.ticket),files=joint(af.file,bf.file),codes=joint(af.status,bf.status);
+  // Quoted replacements, files, dates and URLs can rule OUT a match. But an
+  // example mentioning a ticket/session is not affirmative evidence to reuse it.
+  const rawA=visible===request?af:facts(request),rawB=prior===source?bf:facts(source);
+  if (compareFacts(rawA,rawB) || differentObject(a,b) || (fa && fb && fa!==fb) || /不同(?:功能|目标|任务)|另一(?:件事|个问题|个需求|项工作)|不(?:是|接着)上次/u.test(visible)) return {strong:false,score:0};
   // The same complete application target plus the same kind of action is the
   // same work even when the wording differs. A query/cancel request about the
   // same link is NOT: the action must stay in the apply family on both sides.
   const applyAction=/投递|网申|报名|应聘|递交|申请/u, notApply=/撤回|撤销|取消|删除|查询|查看|进度|状态|结果|修改|更新|替换/u;
   if (af.url.size===1 && bf.url.size===1 && joint(af.url,bf.url).length===1
-    && applyAction.test(request) && applyAction.test(source)
-    && !notApply.test(request) && !notApply.test(source)) return {strong:true,score:6,urlSame:true};
+    && applyAction.test(visible) && applyAction.test(prior)
+    && !notApply.test(visible) && !notApply.test(prior)) return {strong:true,score:6,urlSame:true};
   const x=a.replace(/\s+/gu,'').replace(/^(?:先在|在|为|给|对|跟进)/u,'').replace(/^(?:昨天|前天|刚才)/u,''),y=b.replace(/\s+/gu,'').replace(/^(?:在|为|给|对)/u,'').replace(/^(?:昨天|前天|刚才)/u,'');
   const exact=x===y && x.length>=4 && ((agree && subject.length) || (x.length>=8 && subject.length>=3));
-  const sameEdit=files.length && af.swap && bf.swap && (joint(af.env,bf.env).length || subject.length>=3);
+  const sameEdit=files.length && rawA.swap && rawB.swap && (joint(af.env,bf.env).length || subject.length>=3);
   const contained=x && y && (x.includes(y)||y.includes(x)) && Math.min(x.length,y.length)>=5 && agree && subject.length>=2;
   const ratio=overlap.length/Math.max(1,ag.size,bg.size);
   const sameStatus=codes.length && agree && (ratio>=0.7 || ((x.includes(y)||y.includes(x)) && overlap.length>=3));
   const near=agree && ratio>=0.67 && subject.length>=3 && (files.length || !af.file.size && !bf.file.size);
-  const named=agree && [...af.namedWork,...bf.namedWork].some(v=>v.length>=5 && (af.namedWork.has(v) || request.toLowerCase().includes(v)) && (bf.namedWork.has(v) || source.toLowerCase().includes(v)));
-  const strong=Boolean(tickets.length || named || exact || sameEdit || contained || sameStatus || near);
+  const named=agree && [...af.namedWork,...bf.namedWork].some(v=>v.length>=5 && (af.namedWork.has(v) || visible.toLowerCase().includes(v)) && (bf.namedWork.has(v) || prior.toLowerCase().includes(v)));
+  const unmatchedLiteral=Boolean(opaque.length)!==Boolean(other.length);
+  const strong=Boolean((!unmatchedLiteral || tickets.length || files.length || codes.length || named) && (tickets.length || named || exact || sameEdit || contained || sameStatus || near));
   const concrete=Boolean(named || tickets.length || files.length || codes.length || x.length>=10 && y.length>=10 && subject.length>=4);
 
   return {strong,concrete,score:(strong?100:0)+(subject.length?subject.length*2+overlap.length:Math.min(2,overlap.length))+files.length*3+codes.length*2};

@@ -1,18 +1,14 @@
-import {decompose, routeText} from './grammar.mjs';
+import {routingControl, sessionTargets} from './grammar.mjs';
 import {catalog, follows, isGeneral, scopeFor, similarity, tierFor, chooseTier, projectHints, projectWork, actionable, wantsNew, workflowOwners} from './routing.mjs';
 import {advise, bounded, LIMITS} from './inference.mjs';
 
 const tierLabel = {fast:'快速',standard:'标准',deep:'深度'};
 const blank = (text,why) => {
-  const rule=tierFor(text && text.length<=LIMITS.textChars ? routeText(text) : '');
+  const rule=tierFor(text && text.length<=LIMITS.textChars ? text : '');
   return [{key:'t1',text,project:null,tier:chooseTier(rule),dependsOn:[],decision:'clarify',candidates:[],reason:'规则：'+why+'。本次未生成可执行的路由。'}];
 };
 const publicProject = (path,cat) => path && cat.roots.has(path) ? path : null;
 const ids = rows => [...new Set(rows.map(r=>r.s.id))].slice(0,LIMITS.candidates);
-function sessionRefs(text) {
-  const re=/(?:会话|对话|session(?:id)?)(?:\s*(?:编号|id))?\s*[:：=#]?\s*[「“"'\x60]?([A-Za-z0-9][A-Za-z0-9_:.\-]{0,159})(?![\w./:\-])/giu;
-  return [...new Set([...text.matchAll(re)].map(m=>m[1]))];
-}
 function rank(rows, st, cat) {
   return rows.map(s=>{
     let best={...similarity(st.task.text,s.title,cat),source:'标题'},witness=false;
@@ -25,33 +21,44 @@ function rank(rows, st, cat) {
   }).sort((a,b)=>Number(b.strong)-Number(a.strong) || b.score-a.score || b.s.time-a.s.time);
 }
 function state(task,cat) {
-  const control=routeText(task.text),scope=scopeFor(control,cat);
+  const aliases=new Set([...cat.roots.values()].flatMap(names=>[...names].map(n=>n.toLowerCase())));
+  const knownProject=value=>cat.roots.has(value) || value===cat.general || aliases.has(value.toLowerCase());
+  const {control,quotedIds,error}=routingControl(task.text,knownProject);
+  const scope=error?{paths:[],error}:scopeFor(control,cat);
   const path=!scope.error && scope.paths.length===1?scope.paths[0]:null;
-  const st={task,control,path,scope,cont:false,forceNew:false,ranked:[],hints:[],tier:tierFor(control),locked:scope.error,whyPath:scope.deictic?'“这个项目”只对应一个已授权工作项目':path?'请求明确指定了已选目录':''};
-  if(st.tier.error) st.locked=st.tier.error;
-  if(/(?:二选一|哪个项目|不确定(?:应|要|用|选)|还是(?:在|给|用|选|做|写|修)|或者(?:在|给|用|选|做|写|修))/u.test(control)) st.locked='有未确定的备选目标；请先明确要做哪一个';
+  const st={task,control,quotedIds,path,scope,cont:false,forceNew:false,ranked:[],hints:[],tier:tierFor(task.text),locked:scope.error,whyPath:scope.deictic?'“这个项目”只对应一个已授权工作项目':path?'请求明确指定了已选目录':''};
+  st.locked ??= st.tier.error;
+  if(/(?:二选一|哪个项目|不确定(?:应|要|用|选)|还是(?:在|给|用|选|做|写|修)|或者(?:在|给|用|选|做|写|修))/u.test(control)) st.locked ??= '有未确定的备选目标；请先明确要做哪一个';
   return st;
 }
 function prepare(st,cat) {
-  const {control}=st,refs=sessionRefs(control);
+  const {control}=st, {refs,malformed,multiple}=sessionTargets(control,st.quotedIds);
   function select(path,why,general=false) {
     st.path=path;st.general=general;st.whyPath=why;
     st.ranked=st.ranked.filter(r=>r.s.cwd===path);
   }
   const generalTarget=/(?:使用|用|在|放在|放到|发到|走|到)(?:已选的?|设置的?)?通用目录|通用(?:写作|问答)|(?:不涉及|不指定|无)项目/u.test(control);
   if(generalTarget && !st.locked) {
-    if(!cat.general || (st.path && st.path!==cat.general)) st.locked='通用目录未配置或同时指向其他项目，请确认唯一的目标目录';
+    if(!cat.general || (st.path && st.path!==cat.general)) {
+      st.path=null;st.locked='通用目录未配置或同时指向其他项目，请确认唯一的目标目录';
+    }
     else select(cat.general,'请求指定了通用目录',true);
   }
   st.forceNew=wantsNew(control);
+  if(st.forceNew && [...control.matchAll(/(?:复用|沿用|回到|继续(?:使用)?)(?:(?:上次|之前|原来|已有|现有|刚才|那个|当前|原|旧|的)\s*)*(?:会话|对话)/gu)].some(m=>!/(?:不要|不必|别|不|避免|禁止)(?:再)?\s*$/u.test(control.slice(0,m.index)))) {
+    st.locked='请求同时要求新开和使用已有会话；请明确唯一的目标';
+  }
   st.cont=!st.forceNew && (follows(control.replace(/(?:上|前)一(?:个任务|步|项)(?:的)?/gu,'')) || /(?:复用|沿用)(?!.{0,3}(?:组件|模块|代码))/u.test(control));
   const rows=cat.rows.filter(s=>st.path ? s.cwd===st.path : (!st.scope.paths.length || st.scope.paths.includes(s.cwd)));
   st.ranked=rank(rows,st,cat);
+  if(multiple || refs.length>1) {
+    st.locked='整段请求只能发往一个会话；请选择唯一的目标会话';
+    if(refs.length) st.ranked=st.ranked.filter(r=>refs.includes(r.s.id));
+  } else if(malformed) {st.ranked=[];st.locked='会话标识格式不明确，请指定一个已列出的目标会话';}
   if(st.locked) { if(st.scope.error && !st.scope.paths.length) st.ranked=[]; return; }
-  if(!refs.length && !st.forceNew && /(?:会话|对话|session)(?:\s*(?:编号|id))?\s*[:：=#]?\s*[a-zA-Z0-9_~/]/iu.test(control)) {st.ranked=[];st.locked='会话标识格式或候选不明确，请从当前候选选择';return;}
   if(refs.length) {
     const matches=st.ranked.filter(r=>refs.includes(r.s.id));
-    if(refs.length!==1 || matches.length!==1 || st.forceNew || /(?:不要|别|不发到|不用).{0,10}(?:会话|对话|session)/iu.test(control)) {st.locked='指定的会话不唯一、不在所选精确目录中，或指令有冲突；请明确一个已列出的目标会话';st.ranked=matches;return;}
+    if(matches.length!==1 || st.forceNew || /(?:不要|别|不发到|不用).{0,10}(?:会话|对话|session)/iu.test(control)) {st.locked='指定的会话不唯一、不在所选精确目录中，或指令有冲突；请明确一个已列出的目标会话';st.ranked=matches;return;}
     st.manual=matches[0];select(st.manual.s.cwd,'请求点名了唯一候选会话');return;
   }
   if(!st.path && !st.cont && isGeneral(control)) {
@@ -83,42 +90,28 @@ function prepare(st,cat) {
     if (!st.path && !st.cont && !st.hints.length && !st.ranked.some(r=>r.score>=3) && cat.defaultProject) select(cat.defaultProject,'没有其他项目或同项线索，使用你选定的默认项目');
   }
 }
-async function addRecent(states,cat,getRecent) {
-  if (typeof getRecent!=='function') return;
-  const wanted=new Map();
-  for (const st of states) {
-    // Never enumerate histories to discover a project or choose the latest session.
-    if (st.locked || st.manual || st.forceNew || st.ranked.some(r=>r.strong)) continue;
-    const topic=st.task.text.replace(/继续|刚才|那个|这个|上次|之前|的|会话|项目|一下|这里|工作|任务|事情|处理|请|帮我|跟进|看一看/gu,'').trim();
-    const substantive=[...cat.roots.values()].reduce((v,names)=>[...names].reduce((t,n)=>t.replaceAll(n,''),v),topic).replace(/[^\p{L}\p{N}]+/gu,'');
-    if (substantive.length<3) continue;
-    const weak=st.ranked.filter(r=>r.score>=3);
-    // Without both a continuation cue AND a directory, read only candidates
-    // independently shortlisted by their title/local hints, never a recency sample.
-    const plausible=weak.length?weak:st.cont && st.path?st.ranked:[];
-    if (!plausible.length || plausible.length>LIMITS.recentSessions) continue;
-    const needed=plausible.filter(r=>!wanted.has(r.s.id));
-    if (wanted.size+needed.length>LIMITS.recentSessions) continue; // never inspect just half a tie
-    for (const r of plausible) {
-      if (!wanted.has(r.s.id)) wanted.set(r.s.id,[]);
-      wanted.get(r.s.id).push([st,r]);
-    }
-  }
-  await Promise.all([...wanted].map(async ([id,links])=>{
-    let recent=[];
+async function addRecent(st,cat,getRecent) {
+  // Never enumerate histories to discover a project or choose the latest session.
+  if (typeof getRecent!=='function' || st.locked || st.manual || st.forceNew || st.ranked.some(r=>r.strong)) return;
+  const topic=st.control.replace(/继续|刚才|那个|这个|上次|之前|的|会话|项目|一下|这里|工作|任务|事情|处理|请|帮我|跟进|看一看/gu,'').trim();
+  const substantive=[...cat.roots.values()].reduce((v,names)=>[...names].reduce((t,n)=>t.replaceAll(n,''),v),topic).replace(/[^\p{L}\p{N}]+/gu,'');
+  if (substantive.length<3) return;
+  const weak=st.ranked.filter(r=>r.score>=3);
+  // Without BOTH a continuation cue and an explicit/known scope, read only
+  // candidates independently shortlisted by their title/local hints. Never inspect half a tie.
+  const plausible=weak.length?weak:st.cont && st.path?st.ranked:[];
+  if (plausible.length>LIMITS.recentSessions) return;
+  await Promise.all(plausible.map(async r=>{
     try {
-      const lines=await bounded(()=>getRecent(id),LIMITS.recentMs);
-      if (Array.isArray(lines)) recent=lines.slice(-LIMITS.recentMessages).filter(s=>typeof s==='string').map(s=>s.slice(-LIMITS.snippetChars));
+      const lines=await bounded(()=>getRecent(r.s.id),LIMITS.recentMs);
+      if (Array.isArray(lines)) r.recent=lines.slice(-LIMITS.recentMessages).filter(s=>typeof s==='string').map(s=>s.slice(-LIMITS.snippetChars));
     } catch { /* unavailable context is never evidence for reuse */ }
-    for (const [st,r] of links) {
-      r.recent=recent;
-      for (const line of recent) {
-        const hit=similarity(st.task.text,line,cat);
-        if (hit.score>r.score) Object.assign(r,hit,{source:'最近摘录'});
-      }
+    for (const line of r.recent) {
+      const hit=similarity(st.task.text,line,cat);
+      if (hit.score>r.score) Object.assign(r,hit,{source:'最近摘录'});
     }
   }));
-  for (const st of states) st.ranked.sort((a,b)=>b.score-a.score || b.s.time-a.s.time);
+  st.ranked.sort((a,b)=>b.score-a.score || b.s.time-a.s.time);
 }
 function result(st,cat,model,note) {
   const {task}=st, tier=chooseTier(st.tier,model?.tier);
@@ -163,8 +156,8 @@ function result(st,cat,model,note) {
 }
 
 /**
- * Return a preview (Item[]), never dispatch. project is the allowlisted project
- * path, or null (for a confirmed general create, execute ONLY in settings.generalDir).
+ * Preview exactly one session target for the complete submission; never dispatch.
+ * project is an allowlisted path, or null (for a general create, execute ONLY in settings.generalDir).
  * infer?: ({system:string,user:string,signal:AbortSignal}) => Promise<string>
  * getRecent?: (allowlistedSessionId:string) => Promise<string[]> (oldest first).
  * Tiers are symbols here. The host resolves settings.tiers[tier] at creation time;
@@ -172,24 +165,14 @@ function result(st,cat,model,note) {
  */
 export async function planRequest({text,settings,sessions,getRecent,infer}={}) {
   if (typeof text!=='string' || !text.trim()) return blank('', '请输入要处理的任务');
-  if (text.length>LIMITS.textChars) return blank(text,'请求过长；请分批提交，未截断任务或传给分类器');
-  let tasks;
-  try { tasks=decompose(text.trim(),LIMITS.items); }
-  catch (err) { return blank(text,err.message); }
-  const cat=catalog(settings,sessions), states=tasks.map(t=>state(t,cat));
-  // Inherit only an unambiguous explicit upstream scope (never the most recent
-  // project). Dependency order may validly differ from the presentation order.
-  for (let pass=0;pass<states.length;pass++) {
-    let changes=0;
-    for (const st of states) {
-      if (st.path || st.locked || !st.task.dependsOn.length || /(?:通用目录|不涉及项目)/u.test(st.task.text)) continue;
-      const prev=st.task.dependsOn.map(k=>states.find(s=>s.task.key===k));
-      if (prev.every(p=>p && p.path && !p.locked) && new Set(prev.map(p=>p.path)).size===1) {st.path=prev[0].path;changes++;}
-    }
-    if (!changes) break;
-  }
-  for (const st of states) prepare(st,cat);
-  await addRecent(states,cat,getRecent);
-  const {advice,note}=await advise(states.filter(s=>!s.locked && !s.manual),infer,cat);
-  return states.map(s=>result(s,cat,advice.get(s.task.key),note));
+  if (text.length>LIMITS.textChars) return blank(text,'请求过长，未截断原文或传给分类器');
+  // The submitted message, not a parser or a model, owns the execution payload.
+  // A numbered list and its internal ordering/instructions travel to the same session.
+  const task={key:'t1',text:text.trim(),dependsOn:[]};
+  const cat=catalog(settings,sessions), st=state(task,cat);
+  prepare(st,cat);
+  if (st.locked || st.manual) return [result(st,cat,null,'规则')];
+  await addRecent(st,cat,getRecent);
+  const {advice,note}=await advise(st,infer,cat);
+  return [result(st,cat,advice,note)];
 }

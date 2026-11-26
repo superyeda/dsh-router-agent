@@ -3,7 +3,8 @@ import { createDshAdapter } from './dsh/adapter.mjs';
 // These are Cordis services, not properties on a plain RPC client. The panel
 // consumes them from its injected child fiber, after the parent owns $mount.
 export const panelServices = ['remote', 'remote.session', 'remote.workspace',
-  'remote.remoteAccess', 'remote.routerAgent', 'remoteAccess', 'slots', 'uiWorkspace'];
+  'remote.remoteAccess', 'remote.routerAgent', 'remoteAccess', 'slots',
+  'sessions', 'workspaces', 'uiSession', 'connection'];
 
 export function bindPanelTransport(ctx) {
   const wire = ctx.remote;

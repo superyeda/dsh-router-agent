@@ -2,6 +2,7 @@ import assert from 'node:assert/strict'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { panelDOM } from './panel-dom.mjs'
+import { multiStep } from './ledger.mjs'
 
 const light = '把 docs/install.md 的 Linux 安装标题中「安裝」改成「安装」。'
 const same = 'docs/install.md 里 Linux 安装那一行标题，请把「安裝」写成「安装」，保留标题格式。'
@@ -27,7 +28,7 @@ export function routingModels() {
       // DSH appends time-context and other notice messages with role=user.
       // Inspect only the latest synthetic task; never mistake a notice for it.
       const human = messages.filter(m => m.role === 'user').flatMap(m => m.content ?? []).filter(b=>b.type==='text').map(b=>b.text)
-      const text = human.findLast(t => [light,same,deep,normal,named,cold].some(task=>sameMessage(t,task))) ?? human.at(-1)
+      const text = human.findLast(t => [light,same,deep,normal,named,cold,multiStep].some(task=>sameMessage(t,task))) ?? human.at(-1)
       let classify
       try { classify = JSON.parse(text) } catch { /* plain execution message */ }
       if (Array.isArray(classify?.items)) {
@@ -42,6 +43,7 @@ export function routingModels() {
       }
       assert.equal(typeof text, 'string', 'expected a routed synthetic user message')
       observations.push({kind:'execute', model, text})
+      if (this.pause) { this.pause.entered.resolve(text); await this.pause.release.promise }
       if (this.holdFirst) { this.holdFirst=false; entered.resolve(text); await gate.promise }
       return expectedOutput(text)
     },

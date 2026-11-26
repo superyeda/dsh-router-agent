@@ -1,9 +1,10 @@
-import { TIERS, STATUS, SESSION_MODES, modelLabel, str, list, statusOf, pairKey, options, text, val, msg, order, shortcut } from './shared.mjs';
+import { TIERS, STATUS, SESSION_MODES, modelLabel, str, list, statusOf, matchesFilter, recordStatus, recordCaption, candidateAt, pairKey, options, text, val, msg, order, shortcut } from './shared.mjs';
+import { canRemoveTask } from '../core/record-policy.mjs';
 
 import { createEmptyRecovery } from './recovery.mjs';
 
 export const hasItemDraft = d => !!(d.follow || d.edited || d.sessionChoice || d.dirChoice);
-const when = new Intl.DateTimeFormat('zh-CN',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'});
+const when = new Intl.DateTimeFormat('zh-CN',{year:'numeric',month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit',hour12:false});
 function dateLabel(value) {
   if (value == null || value === '') return '';
   const date = new Date(value); return Number.isNaN(date.getTime()) ? '' : when.format(date);
@@ -18,14 +19,16 @@ function createItem(ctx, taskId, id) {
   ctx.memory.items.set(key,draft);
   const card=el('article','rt-item'), top=el('div','rt-item-top'), no=el('span','rt-index'), badge=el('span','rt-badge');
   const title=el('h4','rt-user-text'), facts=el('dl','rt-facts'), reason=el('p','rt-reason'), relation=el('p','rt-muted');
-  const project=el('dd'), tier=el('dd'), session=el('dd');
-  for (const [name,dd] of [['目标目录',project],['路由档位',tier],['关联会话',session]]) {
+  const project=el('dd'), tier=el('dd'), session=el('dd'), decision=el('dd');
+  for (const [name,dd] of [['目标目录',project],['路由方式',decision],['路由档位',tier],['关联会话',session]]) {
     const group=el('div'); group.append(el('dt','',name),dd); facts.append(group);
   }
   const runtime=el('dl','rt-runtime'), modelKey=el('dt','rt-label'), modelValue=el('dd'), modeValue=el('dd');
   for (const [dt,dd] of [[modelKey,modelValue],[el('dt','rt-label','新会话创建预设'),modeValue]]) {const group=el('div');group.append(dt,dd);runtime.append(group);}
   const instruction=el('p','rt-instruction'), fault=el('p','rt-msg'), feedback=live(); fault.setAttribute('data-tone','red');
   const result=el('details','rt-result'), resultText=el('pre','rt-user-text'); result.append(el('summary','','查看结果'),resultText);
+  const savedHandoff=el('details','rt-result'), savedLabel=el('summary'), savedText=el('pre','rt-user-text'); savedHandoff.append(savedLabel,savedText);
+  const route=el('details','rt-route'); route.append(el('summary','','路由详情'),facts,runtime,reason);
   let item=null, task=null, index=0;
   const unavailable=()=>!ctx.online || ctx.busy(feedback);
   const retryable=()=>['failed','unknown'].includes(item?.status) && item.retryable===true && item.recoverableEmpty!==true && typeof ctx.api.retry==='function';
@@ -66,7 +69,7 @@ function createItem(ctx, taskId, id) {
   async function resolveChoice(kind) {
     if (!item || statusOf(item)!=='clarify' || unavailable()) return;
     const chosen=kind==='reuse' ? draft.sessionChoice : draft.dirChoice;
-    if (!chosen || (kind==='reuse' ? !list(item.candidates).includes(chosen) : !ctx.dirs.some(d=>d.value===chosen))) {
+    if (!chosen || (kind==='reuse' ? !candidateAt(item,chosen,ctx.sessions.get(chosen)?.cwd,true) : !ctx.dirs.some(d=>d.value===chosen))) {
       msg(feedback,kind==='reuse'?'请选择仍有效的候选会话。':'请先从配置中选择目标目录。','red'); return;
     }
     const choice=kind==='reuse'?{kind,sessionId:chosen}:{kind,project:chosen};
@@ -82,13 +85,13 @@ function createItem(ctx, taskId, id) {
       if(draft.routeSuggestion===suggestion) draft.routeSuggestion=null;
       if (draft.sessionChoice===before[0]) draft.sessionChoice='';
       if (draft.dirChoice===before[1]) draft.dirChoice='';
-      return '已提交这项的路由选择。';
+      return '已提交路由选择。';
     });
   }
-  const choices=el('div','rt-action-box'); choices.append(el('h5','','选择此项的目的地'),el('p','rt-muted','只影响当前子项，其他已明确的子项会先走。'));
+  const choices=el('div','rt-action-box'); choices.append(el('h5','','选择目的地'),el('p','rt-muted','查看候选不会发送内容；确认后只投递到所选的一个会话。'));
   const reuse=el('select'), create=el('select'), reuseRow=el('div','rt-choice-row'), createRow=el('div','rt-choice-row');
   const use=button('使用此会话',()=>resolveChoice('reuse')), newSession=button('在此新建',()=>resolveChoice('create'));
-  const peek=button('查看候选会话 ↗',()=>{if (list(item?.candidates).includes(draft.sessionChoice)) open(draft.sessionChoice);},'rt-btn rt-quiet');
+  const peek=button('在侧栏查看候选会话',()=>ctx.pane.open(ref(draft.sessionChoice,'candidate'),peek),'rt-btn rt-quiet');
   const noCandidates=el('p','rt-muted','没有候选会话，请选择目录新建。');
   reuseRow.append(field('复用候选会话',reuse),use,peek); createRow.append(field('在项目或通用目录新建会话',create),newSession);
   const review=button('重新匹配此项（不发送）',reviewRoute);
@@ -114,8 +117,8 @@ function createItem(ctx, taskId, id) {
   }
   const followPanel=el('details','rt-follow'), follow=el('textarea'); follow.rows=2; follow.placeholder='补充要求、提出问题，或请它继续…';
   followPanel.open=!!draft.follow; const followNote=el('p','rt-muted');
-  const post=button('发送此项追问',sendFollow,'rt-btn rt-primary');
-  followPanel.append(el('summary','','追问此项'),followNote,field('仅发往本项关联会话的追问',follow),post);
+  const post=button('发送追问',sendFollow,'rt-btn rt-primary');
+  followPanel.append(el('summary','','追问原会话'),followNote,field('仅发往关联会话的追问',follow),post);
   follow.addEventListener('input',()=>{draft.follow=follow.value; draft.followRev++;}); shortcut(follow,sendFollow);
   function sendFollow() {
     if (!canFollow() || unavailable()) return;
@@ -126,21 +129,26 @@ function createItem(ctx, taskId, id) {
       return '已提交本项追问。';
     });
   }
-  function open(sid) { if (sid) ctx.run(feedback,'打开会话',()=>ctx.api.openSession(sid),()=> '已请求打开原会话。',{offline:true}); }
-  const actions=el('div','rt-actions'), jump=button('打开原会话 ↗',()=>open(item?.sessionId));
+  const ref=(sid,kind='bound')=>({taskId,itemId:id,sid,kind});
+  const actions=el('div','rt-actions'), jump=button('在侧栏查看原会话',()=>ctx.pane.open(ref(item?.sessionId),jump));
   const retry=button('重试此项',()=>{
     if (retryable()) ctx.run(feedback,'重试此项',()=>ctx.api.retry(taskId,id),()=> '已提交重试。');
   });
   const recovery=createEmptyRecovery(ctx,taskId,id,feedback);
-  actions.append(jump,retry); top.append(no,badge); card.append(top,title,facts,runtime,reason,relation,instruction,fault,result,choices,transfer,recovery.node,actions,followPanel,feedback);
+  actions.append(jump,retry); top.append(no,badge); card.append(top,title,relation,instruction,fault,choices,transfer,recovery.node,actions,route,savedHandoff,result,followPanel,feedback);
   function update(next, owner, pos) {
-    item=next; task=owner; index=pos; draft.label=str(item.text) || '未命名子项';
+    item=next; task=owner; index=pos; draft.label=str(item.text) || '未命名任务';
     const status=statusOf(item), [label,tone]=STATUS.get(status), bound=ctx.sessions.get(item.sessionId);
-    text(no,'子项 '+String(pos+1).padStart(2,'0')); text(badge,label); badge.setAttribute('data-tone',tone); card.setAttribute('data-status',status);
-    text(title,item.text || '未命名子项');
+    const children=list(task.items), parts=children.filter(i=>!i.parentItemId), follows=children.filter(i=>i.parentItemId);
+    function itemName(i) {return i.parentItemId?'追问 '+(follows.indexOf(i)+1):parts.length>1?'历史分项 '+(parts.indexOf(i)+1):'原任务';}
+    text(no,itemName(item)); text(badge,label); badge.setAttribute('data-tone',tone); card.setAttribute('data-status',status); card.setAttribute('data-item-id',id);
+    // task.text is shown in full once above the routing facts. Preserve differing legacy text.
+    title.hidden=!item.parentItemId && parts.length===1 && item.text===task.text; text(title,title.hidden?'':item.text || '未命名任务');
+    top.hidden=children.length===1;
     text(project,item.project || bound?.cwd || '尚待明确');
     const band=TIERS.find(([k])=>k===item.tier)?.[1] || item.tier || '尚待明确';
     const isReuse=item.decision==='reuse' || !!item.parentItemId;
+    text(decision,isReuse?'复用原会话':item.decision==='create'?'新建会话':item.decision==='clarify'?'待选择':'未记录');
     text(tier,isReuse?'沿用原会话模型与模式':band);runtime.hidden=isReuse || item.decision!=='create';
     if (!runtime.hidden) {
       const valid=t=>typeof t?.provider==='string' && !!t.provider.trim() && typeof t.model==='string' && !!t.model.trim();
@@ -152,13 +160,13 @@ function createItem(ctx, taskId, id) {
         : item.sessionMode==='inherit'?'跟随 DSH 默认（未记录具体预设）'
         : SESSION_MODES.has(item.sessionMode)?'计划使用：'+SESSION_MODES.get(item.sessionMode):'未记录创建预设，无法推断当前模式');
     }
-    text(session,item.sessionId ? (bound?.title || item.sessionId) : '尚未关联');
+    text(session,item.sessionId ? [bound?.title!==item.sessionId && bound?.title,item.sessionId].filter(Boolean).join(' · ') : '尚未关联');
     text(reason,'路由依据：'+(item.reason || '尚无说明。'));
-    const ref=refId=>{const i=list(task.items).findIndex(it=>it.id===refId); return i<0 ? str(refId) : '子项 '+String(i+1).padStart(2,'0');};
-    const relations=[]; if (item.parentItemId) relations.push('追问来源：'+ref(item.parentItemId));
-    if (list(item.dependsOn).length) relations.push('依赖：'+item.dependsOn.map(ref).join('、'));
+    const referenced=refId=>{const i=children.find(it=>it.id===refId); return i ? itemName(i) : str(refId);};
+    const relations=[]; if (item.parentItemId) relations.push('追问来源：'+referenced(item.parentItemId));
+    if (list(item.dependsOn).length) relations.push('依赖：'+item.dependsOn.map(referenced).join('、'));
     relation.hidden=!relations.length; text(relation,relations.join('　·　'));
-    const help={ 'input-required':item.sessionId ? '需要你前往原会话输入或审批。此入口不会代批权限。' : '需要原会话处理，尚未取得会话 ID。请刷新核对，不要重复派发。',
+    const help={ 'input-required':item.sessionId ? '请在原会话中输入或审批；可用时可在侧栏处理。任务路由台不会代批权限。' : '需要原会话处理，尚未取得会话 ID。请刷新核对，不要重复派发。',
       'unknown':'无法确认这项是否仍在执行。请先核对原会话，不要重复派发。', 'waiting':'前置子项尚未就绪，暂不派发。' }[status];
     instruction.hidden=!help; text(instruction,help);
     const error=str(item.error) || (status==='failed'?'未提供失败原因，请核对原会话或刷新状态。':'');
@@ -171,14 +179,15 @@ function createItem(ctx, taskId, id) {
       options(create,withStale(ctx.dirs,draft.dirChoice),draft.dirChoice,'选择目标目录…');
       reuseRow.hidden=!rows.length && !draft.sessionChoice; noCandidates.hidden=!!rows.length;
       text(noCandidates,review.hidden?'没有候选会话，请选择目录新建。':'当前记录没有候选。可先重新匹配，也可自行选择目录新建。');
-      use.disabled=unavailable() || !candidates.includes(draft.sessionChoice); peek.disabled=ctx.busy(feedback) || !candidates.includes(draft.sessionChoice);
+      use.disabled=unavailable() || !candidateAt(item,draft.sessionChoice,ctx.sessions.get(draft.sessionChoice)?.cwd,true); peek.disabled=!ctx.pane.target(ref(draft.sessionChoice,'candidate'));
       newSession.disabled=unavailable() || !ctx.dirs.some(d=>d.value===draft.dirChoice);
       staleRecommendation.hidden=!draft.routeSuggestion || stillValid(ctx.state,draft.routeSuggestion);
       if (!staleRecommendation.hidden) {
         if (draft.routeSuggestion.kind==='reuse') use.disabled=true; else newSession.disabled=true;
       }
     }
-    const remote=str(item.handoff);
+    const remote=str(item.handoff); savedHandoff.hidden=status==='handoff' || !remote;
+    text(savedLabel,item.approved?'已确认的交接内容':'已记录的交接预览（未确认）'); text(savedText,savedHandoff.hidden?'':remote);
     transfer.hidden=status!=='handoff' && !draft.edited;
     if (!transfer.hidden) {
       if (!draft.edited) {draft.handoff=draft.base=remote;}
@@ -189,33 +198,81 @@ function createItem(ctx, taskId, id) {
       approve.disabled=unavailable() || status!=='handoff'; approve.hidden=status!=='handoff';
     }
     recovery.update(item);
-    jump.hidden=!item.sessionId; jump.disabled=ctx.busy(feedback);
+    jump.hidden=!item.sessionId; jump.disabled=!ctx.pane.target(ref(item.sessionId));
+    jump.title=jump.disabled?'尚未确认此会话仍在当前许可范围，请刷新。':'留在任务台查看原会话';
     retry.hidden=!retryable(); retry.disabled=unavailable();
     actions.hidden=jump.hidden && retry.hidden; followPanel.hidden=!canFollow() && !draft.follow;
     val(follow,draft.follow); post.disabled=unavailable() || !canFollow();
     text(followNote,status==='input-required'?'先到原会话完成输入或审批。草稿可继续编辑，但不能代替原会话的答复。'
-      : canFollow()?'关联到此子项，不会作为新的总任务重新选择目的地。':'未确认原会话已接收这项，当前不能发送追问。');
+      : canFollow()?'只发送到上方关联的原会话，不另建任务或重新路由。':'未确认原会话已接收这项，当前不能发送追问。');
     card.hidden=!!ctx.filter && ctx.filter!==status;
   }
   return {node:card,update};
 }
 
+// A legacy record can point at several sessions. Open directly only if the target is
+// unambiguous; otherwise its details retain a separate control for each original item.
+function primarySession(ctx, task) {
+  const targets=new Map(), active=new Map();
+  for (const i of list(task.items)) {
+    if (!i.sessionId || (ctx.filter && statusOf(i)!==ctx.filter)) continue;
+    const ref={taskId:task.id,itemId:i.id,kind:'bound',sid:i.sessionId};
+    if (!ctx.pane.target(ref)) continue;
+    targets.set(ref.sid,ref);
+    if (['running','queued','dispatching','input-required'].includes(i.status)) active.set(ref.sid,ref);
+  }
+  const pool=active.size ? active : targets;
+  return pool.size===1 ? pool.values().next().value : null;
+}
+
+let detailSerial=0;
 export function createTask(ctx,id) {
-  const {el}=ctx.ui, node=el('section','rt-task rt-card'), head=el('div','rt-task-head'), left=el('div'), right=el('div','rt-progress-box');
-  const stamp=el('p','rt-eyebrow'), title=el('h3','rt-user-text'), count=el('span','rt-label'), bar=el('progress'); bar.setAttribute('aria-label','此任务已完成子项');
-  const itemsBox=el('div','rt-items'), items=new Map(), empty=el('p','rt-muted','任务已记录，尚无子项。');
-  left.append(stamp,title); right.append(count,bar); head.append(left,right); node.append(head,empty,itemsBox);
+  const {el,button}=ctx.ui, node=el('section','rt-task'), row=el('div','rt-record-row'); node.setAttribute('data-task-id',id);
+  let current, target=null, expanded=false;
+  const select=button('',()=>{if(target) ctx.pane.open(target,select); else toggle();},'rt-record-select');
+  const title=el('span','rt-record-title'), meta=el('span','rt-record-meta'), time=el('time'), badge=el('span','rt-badge'), info=el('span','rt-record-info');
+  meta.append(badge,time,info); select.append(title,meta);
+  const toggleButton=button('展开详情',toggle,'rt-btn rt-quiet rt-record-toggle'); row.append(select,toggleButton);
+  const detail=el('div','rt-record-details'), original=el('p','rt-full-text rt-user-text'), itemsBox=el('div','rt-items'), items=new Map();
+  detail.id='rt-task-detail-'+(++detailSerial); toggleButton.setAttribute('aria-controls',detail.id);
+  const admin=el('div','rt-record-admin'), remove=button('删除记录',()=>ctx.cleanup.askOne(id,admin,remove),'rt-btn rt-danger'), policy=el('span','rt-muted'); admin.append(remove,policy);
+  const empty=el('p','rt-muted','尚未记录路由或投递状态。');
+  detail.append(el('p','rt-label','任务原文'),original,itemsBox,empty,admin); node.append(row,detail);
+  function toggle() {
+    if (!current || node.hidden) return;
+    expanded=!expanded; if (!expanded) ctx.cleanup.leave(id); update(current);
+  }
   function update(task) {
-    const children=list(task.items), done=children.filter(i=>i.status==='done').length, stampText=dateLabel(task.createdAt);
-    text(stamp,'总任务'+(stampText?'　/　'+stampText:'')); text(title,task.text || '未命名任务');
-    text(count,done+' / '+children.length+' 项已完成'); bar.max=Math.max(children.length,1); bar.value=done;
-    empty.hidden=!!children.length;
+    current=task; node.hidden=!matchesFilter(task,ctx.filter);
+    const children=list(task.items), status=recordStatus(task);
+    const [label,tone]=STATUS.get(status), caption=recordCaption(task), stamp=dateLabel(task.createdAt);
+    text(title,caption); text(badge,label); badge.setAttribute('data-tone',tone); node.setAttribute('data-status',status);
+    text(time,stamp || '时间未记录'); if(stamp) {const date=new Date(task.createdAt); time.setAttribute('datetime',date.toISOString()); time.title=date.toLocaleString();}
+    else {time.removeAttribute('datetime'); time.title='';}
+    const notes=[], roots=children.filter(i=>!i.parentItemId), follows=children.length-roots.length;
+    if(ctx.filter && !node.hidden && ctx.filter!==status) notes.push('含'+STATUS.get(ctx.filter)[0]+'项');
+    if(children.some(i=>i.recoverableEmpty===true)) notes.push('可核对空会话恢复');
+    if(roots.length>1) notes.push(roots.length+' 个历史分项');
+    if(follows) notes.push(follows+' 条追问');
+    if(children.length>1) notes.push(children.filter(i=>i.status==='done').length+'/'+children.length+' 已完成');
+    if(children.some(i=>ctx.memory.items.has(pairKey(id,i.id)) && hasItemDraft(ctx.memory.items.get(pairKey(id,i.id))))) notes.push('有草稿');
+    target=node.hidden?null:primarySession(ctx,task); if(target) notes.push('查看会话 ›');
+    text(info,notes.join(' · ')); info.hidden=!notes.length;
+    select.setAttribute('data-action',target?'view-session':'view-details'); select.setAttribute('aria-label',(target?'在侧栏查看原会话：':expanded?'收起任务详情：':'查看任务详情：')+caption+'（'+[label,stamp,...notes.filter(n=>n!=='查看会话 ›')].filter(Boolean).join('，')+'）');
+    select.setAttribute('aria-expanded',String(target ? ctx.pane.selected(id) : expanded));
+    select.setAttribute('aria-controls',target ? ctx.pane.node.id : detail.id);
+    node.setAttribute('data-selected',String(ctx.pane.selected(id))); text(toggleButton,expanded?'收起详情':'展开详情'); toggleButton.setAttribute('aria-expanded',String(expanded));
+    detail.hidden=!expanded;
+    // Do not build forms for a whole archive just to paint two lines per record.
+    if (!expanded && !items.size) return;
+    text(original,task.text || '（未记录原文）'); empty.hidden=!!children.length;
     const present=new Set(); const nodes=children.map((item,i)=>{
       present.add(item.id); if (!items.has(item.id)) items.set(item.id,createItem(ctx,id,item.id));
       const view=items.get(item.id); view.update(item,task,i); return view.node;
     });
     order(itemsBox,nodes); for (const key of items.keys()) if (!present.has(key)) items.delete(key);
-    node.hidden=!!ctx.filter && !children.some(it=>statusOf(it)===ctx.filter);
+    const eligible=canRemoveTask(task); remove.disabled=!eligible || !ctx.cleanup.canAsk() || typeof ctx.api.removeTask!=='function';
+    text(policy,eligible?'只删除本机路由记录，保留原会话及其消息。':'这条记录仍需跟踪投递、交接或恢复状态，不能删除。');
   }
   return {node,update};
 }

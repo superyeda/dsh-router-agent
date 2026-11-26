@@ -3,6 +3,7 @@ import { existsSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { panelDOM } from './panel-dom.mjs'
 import { checkRouting } from './routing.mjs'
+import { checkLedger } from './ledger.mjs'
 
 // Run the exact distributed factory in the SAME JS realm as Cordis. Its React
 // component merely passes the DOM root to connectRouter; drive that registered
@@ -12,11 +13,11 @@ async function loadBundle(name) {
   globalThis.window = {__ModuleLoader__: {load(r) { assert.equal(row, undefined); row = r }}}
   await import(new URL('./' + name + '.cjs', import.meta.url))
   assert.equal(row.id, 'dsh-router-agent')
-  return row.factory(id => { assert.equal(id, 'react'); return {} })
+  return row.factory(id => { assert.ok(['react','react-dom'].includes(id)); return {} })
 }
 
-export async function checkProductionPanel({client, Service, host, endpoints, calls, provider, cwd, defaultModel, targetModel, replyText, routing}) {
-  const slots = new Map()
+export async function checkProductionPanel({client, Service, host, endpoints, calls, provider, cwd, defaultModel, targetModel, replyText, routing, installDesktop, streams}) {
+  const slots = new Map(), navigations=[], ledger=process.env.DSH_SMOKE_PHASE==='ledger'
   let notify = () => {}
   // Just the page shell seams: existing main/sidebar surfaces and their
   // access-granted slot gate. The panel itself still verifies owner through
@@ -24,6 +25,9 @@ export async function checkProductionPanel({client, Service, host, endpoints, ca
   class Slots extends Service {
     constructor(ctx) { super(ctx, 'slots') }
     inject(_, fn) { return this.ctx.effect(fn) }
+    provideRoot() { return this.ctx.effect(()=>()=>{}) } // no React hooks rendered
+    installScope(name, adapter) { assert.equal(name,'session');assert.ok(adapter.bindingSource);return this.ctx.effect(()=>()=>{}) }
+    bindStoreScope() { /* Slot host never asks to render this test's hooks. */ }
     register(spec, component) {
       const owner = this.ctx
       return owner.effect(() => {
@@ -37,11 +41,16 @@ export async function checkProductionPanel({client, Service, host, endpoints, ca
     whenAccess(action, fn) { assert.equal(action, 'routerAgent/infer'); return this.ctx.effect(fn) }
   }
   const shell = client.plugin(ctx => {
-    new Slots(ctx); new AccessGate(ctx)
-    ctx.provide('layout', {}); ctx.provide('uiWorkspace', {openSession() { assert.fail('unexpected navigation') }})
+    new Slots(ctx); if (!ledger) {new AccessGate(ctx);ctx.provide('uiSession',{whenAccess(){assert.fail('unexpected sidebar outside ledger scenario')}})}
+    ctx.provide('layout', {}); ctx.provide('uiWorkspace', {openSession(...args) { navigations.push(args); assert.fail('unexpected navigation') }})
   })
   await shell
-  async function withPanel(plugin, doc, legacy, run) {
+  if (ledger) {
+    await installDesktop('dsh-api-remote-access')
+    await installDesktop('dsh-client-ui-session')
+    assert.ok(client.get('uiSession') && client.get('remoteAccess'))
+  }
+  async function withPanel(plugin, doc, legacy, run, display) {
     assert.equal(client.get('remote.routerAgent'), undefined, 'a root mount must not mask this test')
     globalThis.window = doc.win; notify = doc.changed
     const fiber = client.plugin(plugin) // IMPORTANT: real non-root Cordis fiber; never plugin.apply(client)
@@ -51,8 +60,12 @@ export async function checkProductionPanel({client, Service, host, endpoints, ca
       const {spec, owner} = await doc.until(() => slots.get('main'), 'no registered production main slot')
       assert.ok(owner.fiber.runtime, 'slot must not have been registered through the Cordis root')
       if (!legacy) assert.ok('remote.routerAgent' in owner.fiber.inject, 'panel registered outside its injected child')
+      if (ledger) {
+        assert.deepEqual(spec.children['routerAgent.sessionPane'],{kind:'single',scope:'session'})
+        assert.equal(typeof slots.get('routerAgent.sessionPane')?.component,'function')
+      }
       const {connectRouter} = spec.inject()
-      const reopen = async () => { disconnect?.(); disconnect = connectRouter(doc.root); await doc.ready() }
+      const reopen = async () => { disconnect?.(); disconnect = connectRouter(doc.root,display); await doc.ready() }
       await reopen(); await run(reopen)
     } finally {
       try { disconnect?.() } finally { await fiber.dispose() }
@@ -108,6 +121,8 @@ export async function checkProductionPanel({client, Service, host, endpoints, ca
       assert.equal(name, 'dsh-router-agent'); assert.equal(version, '0.1.2')
       legacyRouting = await loadBundle('legacy-routing')
     }
-    await checkRouting({host, native:client.remote, cwd, provider, production, legacyRouting, withPanel, endpoints, routing})
+    if (process.env.DSH_SMOKE_PHASE==='ledger') {
+      await checkLedger({host,client,production,withPanel,endpoints,streams,navigations,routing,provider,cwd})
+    } else await checkRouting({host, native:client.remote, cwd, provider, production, legacyRouting, withPanel, endpoints, routing})
   } finally { delete globalThis.window; await shell.dispose() }
 }

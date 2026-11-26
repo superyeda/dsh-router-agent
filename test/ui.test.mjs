@@ -18,12 +18,13 @@ class Element extends EventTarget {
   replaceChildren(...nodes){for(const n of [...this.children])n.remove();this.data='';this.append(...nodes);}
   remove(){if(this.parent){const a=this.parent.children;a.splice(a.indexOf(this),1);this.parent=null;}}
   insertBefore(n,next){n.remove();const i=next?this.children.indexOf(next):this.children.length;assert.ok(i>=0);this.children.splice(i,0,n);n.parent=this;}
+  get isConnected(){return this===this.ownerDocument.root || !!this.parent?.isConnected;}
   focus(){this.ownerDocument.activeElement=this;}
-  click(){if (!this.disabled)this.dispatchEvent(new Event('click'));}
+  click(){if (this.disabled) return; this.dispatchEvent(new Event('click')); if(this.tag==='summary' && this.parent?.tag==='details') this.parent.open=!this.parent.open;}
 }
-const dom=()=>{const doc={defaultView:new EventTarget(),createElement(tag){return new Element(doc,tag);}};return doc.createElement('main');};
+const dom=()=>{const doc={defaultView:new EventTarget(),createElement(tag){return new Element(doc,tag);}};return doc.root=doc.createElement('main');};
 const walk=n=>[n,...n.children.flatMap(walk)];
-const visible=n=>!!n && !n.hidden && (!n.parent || visible(n.parent));
+const visible=n=>!!n && n.isConnected && !n.hidden && (n.parent?.tag!=='details' || n.tag==='summary' || n.parent.open===true) && (!n.parent || visible(n.parent));
 const find=(n,pred)=>{const result=walk(n).find(pred);assert.ok(result,'Missing node: '+pred);return result;};
 const btn=(n,label)=>find(n,c=>c.tag==='button' && c.textContent===label);
 const control=(n,label)=>find(n,c=>c.tag==='label' && c.children[0]?.textContent===label).children[1];
@@ -35,7 +36,10 @@ const uiState=()=>({settings:{generalDir:'/general',projects:[{path:'/web',name:
 function fixture(state=uiState(), extra={}){
   const root=dom(),listeners=new Set(),calls=[];let unsubs=0;
   const emit=(...args)=>listeners.forEach(f=>f(...args));
-  const api={getState:()=>state,subscribe:f=>{listeners.add(f);return ()=>{listeners.delete(f);unsubs++;};},...extra};
+  const api={getState:()=>state,subscribe:f=>{listeners.add(f);return ()=>{listeners.delete(f);unsubs++;};},
+    mountSessionPane:(_host,sid)=>{calls.push(['mountSessionPane',sid]);return ()=>{};},
+    removeTask:id=>{calls.push(['removeTask',id]);const prev=state.tasks.length;state.tasks=state.tasks.filter(t=>t.id!==id);return prev-state.tasks.length;},
+    clearCompleted:ids=>{calls.push(['clearCompleted',ids]);const prev=state.tasks.length;state.tasks=state.tasks.filter(t=>!ids.includes(t.id) || !t.items.every(i=>i.status==='done'));return prev-state.tasks.length;},...extra};
   for(const k of ['submit','resolve','approve','followUp','retry','refresh','openSession','saveSettings']) if (!api[k]) api[k]=async(...args)=>{calls.push([k,...args]);if(k==='saveSettings')state.settings=args[0];};
   return {root,api,state,calls,emit,get unsubs(){return unsubs;},dispose:mountRouter(root,api)};
 }
@@ -43,7 +47,10 @@ const settle=()=>new Promise(r=>setImmediate(r));
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 const addTask=(state,...items)=>state.tasks.push({id:'t:1',text:'跨项目任务',createdAt:'2026-01-01T00:00:00Z',items});
 const item=(id,status,more={})=>({id,text:id+' 的内容',status,tier:'standard',project:'/web',reason:'按目录选择',candidates:[],dependsOn:[],...more});
-const nodeFor=(root,id)=>find(root,c=>c.tag==='article' && c.children.some(n=>n.tag==='h4' && n.textContent===id+' 的内容'));
+const rowFor=(root,id='t:1')=>find(root,n=>n.getAttribute('data-task-id')===id);
+const expand=(root,id)=>{const row=rowFor(root,id), b=walk(row).find(n=>n.tag==='button' && n.textContent==='展开详情');if(b) b.click();return row;};
+const nodeFor=(root,id,taskId)=>find(expand(root,taskId),c=>c.tag==='article' && c.getAttribute('data-item-id')===id);
+const disclose=(n,label)=>{const s=find(n,c=>c.tag==='summary' && c.textContent===label);if(!s.parent.open) s.click();};
 
 test('目录与模型按已知能力校验；保留默认强度，不猜模型',()=>{
   const s=uiState(), models=catalogEntries(s.catalog.concat(s.catalog));assert.equal(models.length,1);
@@ -138,7 +145,7 @@ test('结果卡区分未确认的计划、宿主已确认的创建配置、旧�
     item('applied','running',{decision:'create',configured:true,selection:plan,appliedSelection:actual,sessionMode:'inherit'}),
     item('old','done',{decision:'create',configured:true,selection:plan}),item('invalid','done',{decision:'create',configured:true,selection:{model:'only'}}),
     item('reuse','done',{decision:'reuse',configured:true,selection:plan,appliedSelection:actual,agentPreset:'ptc'}));
-  const f=fixture(s),rt=id=>find(nodeFor(f.root,id),n=>n.className==='rt-runtime');
+  const f=fixture(s),rt=id=>{const n=nodeFor(f.root,id);disclose(n,'路由详情');return find(n,x=>x.className==='rt-runtime');};
   assert.ok(rt('plan').textContent.includes('计划模型 · 尚无配置确认'));assert.ok(rt('plan').textContent.includes('请求的预设：PTC 模式'));
   assert.ok(rt('applied').textContent.includes('创建时已配置 · 宿主已确认'));assert.ok(rt('applied').textContent.includes('actual / y · 思考：high'));assert.ok(!rt('applied').textContent.includes('planned'));assert.ok(rt('applied').textContent.includes('跟随 DSH 默认'));
   assert.ok(rt('old').textContent.includes('创建时已配置'));assert.ok(rt('old').textContent.includes('未记录创建预设'));assert.ok(!rt('invalid').textContent.includes('宿主已确认'));
@@ -156,12 +163,12 @@ test('正在编辑或等待提交：订阅更新、断线、403 与重复点击�
   f.dispose();f.dispose();assert.equal(f.unsubs,1);assert.equal(f.root.children.length,0);
 });
 
-test('全部状态与总进度单独可见；筛选不会把相邻状态合并',()=>{
+test('旧多项按记录计数，展开后每种状态及筛选仍可辨认',()=>{
   const s=uiState(), ids=[...STATUS.keys()];addTask(s,...ids.map(v=>item(v,v)));const f=fixture(s);
   for(const [id,[label]] of STATUS){const el=nodeFor(f.root,id);assert.equal(el.getAttribute('data-status'),id);assert.ok(visible(find(el,c=>c.textContent===label)));}
-  const allProgress=find(f.root,c=>c.getAttribute('aria-label')==='所有任务已完成子项');assert.equal(allProgress.value,1);assert.equal(allProgress.max,ids.length);
-  fill(control(f.root,'按子项状态筛选'),'queued');assert.ok(visible(nodeFor(f.root,'queued')));assert.ok(!visible(nodeFor(f.root,'running')));
-  fill(control(f.root,'按子项状态筛选'),'');assert.ok(visible(nodeFor(f.root,'input-required')));f.dispose();
+  assert.ok(note(f.root,'共 1 条 · 待处理 1 · 进行中 1 · 已完成 0'));const filter=control(f.root,'按状态筛选');assert.equal(filter.children[0].textContent,'全部状态（1）');
+  fill(control(f.root,'按状态筛选'),'queued');assert.ok(visible(nodeFor(f.root,'queued')));assert.ok(!visible(nodeFor(f.root,'running')));
+  fill(control(f.root,'按状态筛选'),'');assert.ok(visible(nodeFor(f.root,'input-required')));f.dispose();
 });
 
 test('候选复用、目录新建：明确点击后仅针对本项，过时选择可见但不能提交',async()=>{
@@ -170,7 +177,7 @@ test('候选复用、目录新建：明确点击后仅针对本项，过时选�
   const reuse=control(a,'复用候选会话');fill(reuse,'s:1');s.tasks[0].items[0].candidates=[];f.emit();
   assert.equal(reuse.value,'s:1');assert.ok(btn(a,'使用此会话').disabled);assert.ok(walk(reuse).some(o=>o.textContent.includes('不再可选')));
   s.tasks[0].items[0].candidates=['s:1'];f.emit();assert.deepEqual(f.calls,[]);
-  btn(a,'查看候选会话 ↗').click();await settle();btn(a,'使用此会话').click();await settle();assert.deepEqual(f.calls[0],['openSession','s:1']);
+  btn(a,'在侧栏查看候选会话').click();await settle();assert.ok(visible(find(f.root,n=>n.getAttribute('aria-label')==='原会话侧栏')));btn(a,'使用此会话').click();await settle();assert.deepEqual(f.calls[0],['mountSessionPane','s:1']);
   assert.deepEqual(f.calls[1],['resolve','t:1','a',{kind:'reuse',sessionId:'s:1'}]);
   fill(control(a,'在项目或通用目录新建会话'),'/general');btn(a,'在此新建').click();await settle();
   assert.deepEqual(f.calls[2],['resolve','t:1','a',{kind:'create',project:'/general'}]);f.dispose();
@@ -198,14 +205,14 @@ test('旧待选项可无发送地重新匹配精确会话或目录；保留在�
   f.dispose();
 });
 
-test('交接预览保留手改，即使远端更新；需输入仅跳回原会话，追问绑定源子项',async()=>{
+test('交接预览保留手改，即使远端更新；需输入在原生侧栏处理，追问仍绑定来源',async()=>{
   const s=uiState();const a=item('a','handoff',{handoff:'上游结果',dependsOn:['b']}),b=item('b','input-required',{sessionId:'s-b'}),c=item('c','done',{decision:'reuse',sessionId:'s-c'});
-  addTask(s,a,b,c);const f=fixture(s), ra=nodeFor(f.root,'a'),rb=nodeFor(f.root,'b'),rc=nodeFor(f.root,'c');
+  s.sessions=[{id:'s-b',cwd:'/web'},{id:'s-c',cwd:'/web'}];addTask(s,a,b,c);const f=fixture(s), ra=nodeFor(f.root,'a'),rb=nodeFor(f.root,'b'),rc=nodeFor(f.root,'c');
   const transfer=control(ra,'将发往目标会话的内容（可编辑）');assert.equal(transfer.value,'上游结果');
   fill(transfer,'只传这一段\n<pre>');a.handoff='上游另一个版本';f.emit();assert.equal(transfer.value,'只传这一段\n<pre>');assert.ok(visible(btn(ra,'载入最新交接预览')));assert.deepEqual(f.calls,[]);
   btn(ra,'批准并发送交接').click();await settle();assert.deepEqual(f.calls[0],['approve','t:1','a','只传这一段\n<pre>']);
-  assert.ok(!visible(btn(rb,'批准并发送交接')));assert.ok(!visible(btn(rb,'发送此项追问')));btn(rb,'打开原会话 ↗').click();await settle();assert.deepEqual(f.calls[1],['openSession','s-b']);
-  assert.ok(rc.textContent.includes('沿用原会话模型与模式'));const reply=control(rc,'仅发往本项关联会话的追问');fill(reply,'继续这里');btn(rc,'发送此项追问').click();await settle();
+  assert.ok(!visible(btn(rb,'批准并发送交接')));assert.ok(!visible(btn(rb,'发送追问')));btn(rb,'在侧栏查看原会话').click();await settle();assert.deepEqual(f.calls[1],['mountSessionPane','s-b']);
+  assert.ok(rc.textContent.includes('沿用原会话模型与模式'));disclose(rc,'追问原会话');const reply=control(rc,'仅发往关联会话的追问');fill(reply,'继续这里');btn(rc,'发送追问').click();await settle();
   assert.deepEqual(f.calls[2],['followUp','t:1','c','继续这里']);assert.equal(reply.value,'');f.dispose();
 });
 
@@ -277,8 +284,8 @@ test('不从错误、retryable 或旧 sessionId 推断恢复；缺少绑定或�
 
 test('跨订阅、筛选和授权范围内重挂载保留草稿；不同作用域不会接手',()=>{
   const s=uiState(),scope={};addTask(s,item('a','done',{sessionId:'s'}));const f=fixture(s,{draftScope:scope});
-  const reply=control(nodeFor(f.root,'a'),'仅发往本项关联会话的追问');fill(reply,'未发内容');fill(control(f.root,'任务内容'),'还没提交');
-  fill(control(f.root,'按子项状态筛选'),'running');fill(control(f.root,'按子项状态筛选'),'');assert.equal(control(nodeFor(f.root,'a'),'仅发往本项关联会话的追问'),reply);
+  const a=nodeFor(f.root,'a');disclose(a,'追问原会话');const reply=control(a,'仅发往关联会话的追问');fill(reply,'未发内容');fill(control(f.root,'任务内容'),'还没提交');
+  fill(control(f.root,'按状态筛选'),'running');fill(control(f.root,'按状态筛选'),'');assert.equal(control(nodeFor(f.root,'a'),'仅发往关联会话的追问'),reply);
   const unloadEvent=new Event('beforeunload',{cancelable:true});f.root.ownerDocument.defaultView.dispatchEvent(unloadEvent);assert.equal(unloadEvent.defaultPrevented,true);
   s.tasks=[];f.emit();const lost=find(f.root,n=>n.className==='rt-card rt-orphan');assert.ok(visible(lost));assert.ok(lost.textContent.includes('未发内容'));f.dispose();
   const next=fixture(s,{draftScope:scope});assert.equal(control(next.root,'任务内容').value,'还没提交');next.dispose();
@@ -291,4 +298,110 @@ test('旧异步读取不压过新快照；长期断连及订阅失败都明示�
   let loaded=false;const g=fixture(s,{subscribe:()=>{throw Error('没有事件订阅');},getState:()=>{if(!loaded)throw Error('401');return s;},refresh:async()=>{loaded=true;}});
   assert.ok(alert(g.root,/读取入口状态失败.*未获授权/));assert.ok(walk(g.root).some(n=>n.tag==='p' && visible(n) && n.textContent.includes('实时更新不可用')));
   btn(g.root,'刷新状态').click();await settle();assert.ok(!btn(g.root,'提交任务').disabled);g.dispose();
+});
+
+const record=(state,id,items,text=id,createdAt=1736000000000)=>{
+  const t={id,kind:'conversation',text,createdAt,items}; state.tasks.push(t);return t;
+};
+const selectRecord=(root,id)=>find(rowFor(root,id),n=>n.tag==='button' && n.getAttribute('data-action'));
+const side=root=>find(root,n=>n.tag==='aside' && n.getAttribute('aria-label')==='原会话侧栏');
+
+test('历史默认只呈现时间、状态和摘要；一段原文只展开一份，追问、结果和旧交接均可核对',()=>{
+  const s=uiState(), raw='检查网站和文档\n  保持格式 '+ '长'.repeat(145), a=item('base','done',{text:raw,result:'完整结果 <b>不解释为 HTML</b>'});
+  record(s,'new',[a,item('follow','running',{parentItemId:'base',accepted:true})],raw,1750000000000);
+  const old=record(s,'old',[item('up','done'),item('down','done',{dependsOn:['up'],handoff:'原样交接\n不改写',approved:true})],'历史完整原文',1740000000000); delete old.kind;
+  const f=fixture(s), row=rowFor(f.root,'new'), history=find(f.root,n=>n.getAttribute('aria-label')==='任务历史');
+  assert.deepEqual(history.children.map(n=>n.getAttribute('data-task-id')),['new','old']);
+  for(const r of history.children) {
+    assert.equal(btn(r,'展开详情').getAttribute('aria-expanded'),'false');assert.equal(walk(r).filter(n=>n.tag==='article').length,0);
+    assert.ok(visible(find(r,n=>n.tag==='time' && n.getAttribute('datetime'))));
+  }
+  const headline=selectRecord(f.root,'new');assert.match(headline.textContent,/检查网站和文档 保持格式.*…/);assert.ok(!headline.textContent.includes('\n'));assert.match(headline.textContent,/运行中/);
+  assert.ok(!headline.textContent.includes('完整结果'));assert.ok(!f.root.textContent.includes('创建总任务'));
+  btn(row,'展开详情').click();f.emit();assert.ok(visible(btn(row,'收起详情')));
+  assert.equal(walk(row).filter(n=>n.data===raw).length,1);const base=nodeFor(f.root,'base','new');
+  assert.ok(!visible(find(base,n=>n.data===a.result)));disclose(base,'查看结果');assert.ok(visible(find(base,n=>n.data===a.result)));
+  assert.ok(!visible(find(base,n=>n.data==='路由依据：按目录选择')));disclose(base,'路由详情');assert.ok(visible(find(base,n=>n.data==='路由依据：按目录选择')));
+  assert.ok(nodeFor(f.root,'follow','new').textContent.includes('追问来源：原任务'));
+  const prior=nodeFor(f.root,'down','old');assert.ok(prior.textContent.includes('依赖：历史分项 1'));disclose(prior,'已确认的交接内容');assert.ok(visible(find(prior,n=>n.data==='原样交接\n不改写')));
+  assert.ok(!visible(btn(prior,'批准并发送交接')));btn(row,'收起详情').click();assert.ok(!visible(base));f.dispose();
+});
+
+test('单条清理必须明确确认；离线只删本机记录，未发送待选择和确定失败可删，在途或需恢复不可删',async()=>{
+  const s=uiState();s.connected=false;s.sessions=[{id:'original',cwd:'/web',title:'原会话'}];
+  for(const status of ['new','queued','dispatching','running','input-required','waiting','handoff','unknown','recovering']) record(s,status,[item('i',status)]);
+  record(s,'unconfirmed',[item('i','failed',{attempted:true,accepted:false})]);record(s,'recovery',[item('i','failed',{recoverableEmpty:true})]);
+  record(s,'mixed',[item('a','done'),item('b','running')]);record(s,'tried',[item('i','clarify',{attempted:true})]);
+  for(const [id,status] of [['done','done'],['manual','clarify'],['known','failed']]) record(s,id,[item('i',status)]);
+  const f=fixture(s), original=structuredClone(s.sessions);
+  for(const t of s.tasks) {
+    const remove=btn(expand(f.root,t.id),'删除记录'), allowed=['done','manual','known'].includes(t.id);assert.equal(!remove.disabled,allowed,t.id);
+    if(!allowed) {remove.dispatchEvent(new Event('click'));assert.ok(!walk(f.root).some(n=>visible(n) && n.textContent==='确认删除这条记录'));}
+  }
+  const r=rowFor(f.root,'manual'), b=btn(r,'删除记录');b.click();assert.deepEqual(f.calls,[]);
+  assert.ok(note(r,'不会删除原会话或消息，也不会停止会话'));const confirm=btn(r,'确认删除这条记录');btn(r,'取消').click();confirm.dispatchEvent(new Event('click'));assert.deepEqual(f.calls,[]);
+  // An old confirmation control must not act on a different newly reviewed record.
+  const known=rowFor(f.root,'known');btn(known,'删除记录').click();confirm.dispatchEvent(new Event('click'));await settle();assert.deepEqual(f.calls,[]);btn(known,'取消').click();
+  b.click();btn(r,'确认删除这条记录').click();confirm.dispatchEvent(new Event('click'));await settle();assert.deepEqual(f.calls,[['removeTask','manual']]);
+  assert.equal(r.isConnected,false);assert.deepEqual(s.sessions,original);assert.ok(note(f.root,'已移除 1 条本机路由记录'));f.dispose();
+});
+
+test('清理已完成冻结当前可见 IDs，以确认后的实际数量反馈；过滤、取消和新完成项不扩大范围',async()=>{
+  const s=uiState(), done=id=>record(s,id,[item('i','done')]);done('a');const b=done('b');const late=record(s,'later',[item('i','queued')]);
+  record(s,'mixed',[item('one','done'),item('two','clarify')]);record(s,'failed',[item('i','failed')]);const f=fixture(s),filter=control(f.root,'按状态筛选');
+  fill(filter,'queued');assert.ok(btn(f.root,'清理已完成').disabled);fill(filter,'done');const bulk=btn(f.root,'清理已完成');bulk.click();
+  assert.ok(note(f.root,'2 条已完成记录'));assert.deepEqual(f.calls,[]);assert.equal(rowFor(f.root,'mixed').getAttribute('data-status'),'clarify');assert.match(selectRecord(f.root,'mixed').textContent,/含已完成项/);
+  btn(f.root,'取消').click();assert.deepEqual(f.calls,[]);bulk.click();
+  b.items[0].status='running';late.items[0].status='done';done('joined-after-preview');f.emit();
+  const yes=btn(f.root,'确认清理已完成记录');yes.click();yes.dispatchEvent(new Event('click'));await settle();
+  assert.deepEqual(f.calls,[['clearCompleted',['a']]]);assert.deepEqual(s.tasks.map(t=>t.id),['b','later','mixed','failed','joined-after-preview']);
+  assert.ok(note(f.root,'已移除 1 条本机路由记录'));bulk.click();fill(filter,'failed');yes.dispatchEvent(new Event('click'));assert.equal(f.calls.length,1);f.dispose();
+});
+
+test('过时的删除确认不能在订阅更新、异步读取、切换页面或卸载后执行',async()=>{
+  const s=uiState(), t=record(s,'id',[item('i','clarify')]),f=fixture(s),r=expand(f.root,'id'),ask=btn(r,'删除记录');
+  ask.click();const stale=btn(r,'确认删除这条记录');t.items[0].status='unknown';f.emit();assert.ok(!visible(stale));stale.dispatchEvent(new Event('click'));assert.deepEqual(f.calls,[]);
+  t.items[0].status='done';f.emit();ask.click();let g=deferred(),then=structuredClone(s);f.api.getState=()=>g.promise;btn(r,'确认删除这条记录').click();
+  t.items[0].status='queued';f.emit(s);g.resolve(then);await settle();assert.deepEqual(f.calls,[]);assert.ok(note(f.root,'没有移除记录'));
+  t.items[0].status='done';f.emit(s);ask.click();settings(f.root);stale.dispatchEvent(new Event('click'));await settle();assert.deepEqual(f.calls,[]);
+  btn(f.root,'任务台').click();ask.click();g=deferred();f.api.getState=()=>g.promise;btn(r,'确认删除这条记录').click();f.dispose();g.resolve(s);await settle();assert.deepEqual(f.calls,[]);
+});
+
+test('点击活动记录直接在本页挂载；重绘复用、快速切换、显式关闭、断线和卸载均释放对应租约',async()=>{
+  const s=uiState(), gates=[],events=[];s.sessions=['A','B'].map(id=>({id,cwd:'/web',title:'会话 '+id}));
+  for(const sid of ['A','B']) record(s,'task-'+sid,[item('i','running',{sessionId:sid})]);
+  const f=fixture(s,{mountSessionPane:(host,sid)=>{const part={host,sid,clean:0};events.push(part);host.append(host.ownerDocument.createElement('section'));
+    if(sid==='B') return ()=>{part.clean++;}; const g=deferred();gates.push(()=>g.resolve(()=>{part.clean++;}));return g.promise;}});
+  const aside=side(f.root), a=selectRecord(f.root,'task-A'), b=selectRecord(f.root,'task-B');assert.ok(!visible(aside));assert.equal(a.getAttribute('data-action'),'view-session');
+  a.click();assert.ok(visible(aside));assert.ok(visible(control(f.root,'任务内容')));assert.equal(btn(rowFor(f.root,'task-A'),'展开详情').getAttribute('aria-expanded'),'false');
+  const [first]=events;assert.equal(first.host.getAttribute('data-session-id'),'A');for(let n=first.host;n;n=n.parent) assert.ok(!n.className?.split(' ').includes('dshr'));
+  f.emit();a.click();assert.equal(events.length,1);assert.ok(first.host.isConnected);
+  b.click();assert.ok(!first.host.isConnected);assert.equal(events[1].sid,'B');gates[0]();await settle();assert.equal(first.clean,1);assert.equal(events[1].clean,0);
+  const close=btn(aside,'关闭侧栏');close.click();assert.ok(!visible(aside));assert.equal(events[1].clean,1);assert.equal(f.root.ownerDocument.activeElement,b);
+  b.click();s.connected=false;f.emit();assert.equal(events[2].clean,1);assert.ok(!visible(aside));assert.equal(b.getAttribute('data-action'),'view-details');
+  s.connected=true;f.emit();a.click();settings(f.root);assert.ok(!visible(aside));gates[1]();await settle();assert.equal(events[3].clean,1);
+  btn(f.root,'任务台').click();a.click();f.dispose();f.dispose();gates[2]();await settle();assert.equal(events[4].clean,1);assert.deepEqual(f.calls,[]);
+});
+
+test('侧栏仅使用最新已授权的绑定或候选；失效标记不降级、撤权后清空，从不跳到全局会话',async()=>{
+  const s=uiState();s.sessions=[{id:'same',cwd:'/web',title:'原会话'}];const candidate=item('i','clarify',{project:null,candidates:['same'],candidateDirs:{same:'/web'}});
+  record(s,'pending',[candidate]);record(s,'bound',[item('b','running',{sessionId:'same'})]);let allowed=null,clean=0,shows=0;
+  const f=fixture(s,{sessionPaneTarget:()=>allowed,mountSessionPane:(_,sid)=>{assert.equal(sid,'same');shows++;return ()=>{clean++;};}});
+  const c=nodeFor(f.root,'i','pending'), sel=control(c,'复用候选会话'), peek=btn(c,'在侧栏查看候选会话');fill(sel,'same');
+  assert.ok(peek.disabled);peek.dispatchEvent(new Event('click'));assert.equal(shows,0);assert.equal(selectRecord(f.root,'bound').getAttribute('data-action'),'view-details');
+  allowed='/web';s.sessions=[];f.emit();assert.ok(!peek.disabled);peek.click();assert.equal(shows,1);assert.ok(visible(side(f.root)));
+  // Same ID still generally authorized through another record, but this *source* is withdrawn.
+  candidate.candidates=[];f.emit();assert.ok(!visible(side(f.root)));assert.equal(clean,1);
+  candidate.candidates=['same'];candidate.candidateDirs={same:'/elsewhere'};f.emit();assert.ok(peek.disabled);peek.dispatchEvent(new Event('click'));assert.equal(shows,1);
+  selectRecord(f.root,'bound').click();assert.equal(shows,2);s.sessions=[{id:'same',cwd:'/web'}];allowed=null;f.emit();assert.ok(!visible(side(f.root)));assert.equal(clean,2);
+  f.dispose();const old=fixture(s,{mountSessionPane:null});const source=nodeFor(old.root,'b','bound');btn(source,'在侧栏查看原会话').dispatchEvent(new Event('click'));await settle();assert.deepEqual(old.calls,[]);old.dispose();
+});
+
+test('无法区分多份旧活动会话时先展示原分项；过期挂载错误不能覆盖新的会话',async()=>{
+  const s=uiState();s.sessions=['one','two'].map(id=>({id,cwd:'/web'}));addTask(s,item('a','running',{sessionId:'one'}),item('b','running',{sessionId:'two'}));
+  const pending=deferred(), seen=[];const f=fixture(s,{mountSessionPane:(_,sid)=>{seen.push(sid);return sid==='one'?pending.promise:()=>{};}}),r=rowFor(f.root);
+  const choose=selectRecord(f.root,'t:1');assert.equal(choose.getAttribute('data-action'),'view-details');choose.click();assert.ok(visible(btn(r,'收起详情')));assert.deepEqual(seen,[]);
+  btn(nodeFor(f.root,'a'),'在侧栏查看原会话').click();btn(nodeFor(f.root,'b'),'在侧栏查看原会话').click();pending.reject(Error('过期失败'));await settle();
+  assert.ok(visible(side(f.root)));assert.deepEqual(seen,['one','two']);assert.ok(!alert(f.root,/过期失败/));
+  s.sessions=[];f.emit();assert.ok(!visible(side(f.root)));assert.deepEqual(f.calls,[]);f.dispose();
 });

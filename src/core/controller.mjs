@@ -2,6 +2,7 @@ import { planRequest } from '../planner/index.mjs';
 import { emptyDocument } from './journal.mjs';
 import { expectedRecoveryId } from '../host/contract.mjs';
 import { acceptedWork } from './routing-context.mjs';
+import { candidateAt, canRemoveTask, isCompletedTask } from './record-policy.mjs';
 import { resolveTiers } from './models.mjs';
 import { permitted, checkTier, validateSettings, materialize, message, excerpt, creationMode } from './validation.mjs';
 
@@ -9,10 +10,11 @@ const observing = new Set(['queued','running','input-required']);
 const detail = e => excerpt(e instanceof Error ? e.message : String(e), 700);
 const capResult = 16000;
 
-/** Outbox + task graph for one personal DSH entry. All host work goes through the adapter. */
-export function createRouter({adapter, journal, infer, navigate, plan=planRequest, id=()=>crypto.randomUUID(), now=()=>Date.now()}) {
+/** Single-destination outbox; v1 task graphs already on disk keep their original receipts. */
+export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>crypto.randomUUID(), now=()=>Date.now()}) {
   let doc = emptyDocument(), sessions=[], workspaces=[], catalog=[], connected=false, notice='', stopped=false, writing=false, storageFailure=null;
   const listeners = new Set();
+  let paneIndex=null;
   try { doc=journal.read(); } catch(e) { notice=detail(e); storageFailure=e; }
   // v0.1.1 persisted only the sanitized English message, not its error code.
   // Recognize just the old pre-admission failures. A matching string/key is a
@@ -37,7 +39,7 @@ export function createRouter({adapter, journal, infer, navigate, plan=planReques
     }
     return state;
   };
-  const emit = () => { if (stopped || !listeners.size) return; const state=view(); for(const f of listeners) {try{f(state);}catch(e){console.warn('router-agent: view update failed', e?.name);}} };
+  const emit = () => { paneIndex=null; if (stopped || !listeners.size) return; const state=view(); for(const f of listeners) {try{f(state);}catch(e){console.warn('router-agent: view update failed', e?.name);}} };
   const change = () => {
     if (storageFailure) throw storageFailure;
     try { journal.write(doc); } catch(e) { storageFailure=e; notice=detail(e); emit(); throw e; }
@@ -148,9 +150,19 @@ export function createRouter({adapter, journal, infer, navigate, plan=planReques
     }
   }
   async function pump(task) {
+    if(task.kind==='conversation') {
+      // The first message plus optional follow-ups; they all belong to one
+      // conversation. No graph, fan-out, context transfer or parallel dispatch.
+      for(const item of task.items) if(item.status==='new') {
+        ensureLive();
+        if(item.decision==='clarify') {item.status='clarify';change();}
+        else await dispatch(item);
+      }
+      return;
+    }
+    // Compatibility only: keep the identities and approval gates of records
+    // persisted by 0.1.x; never convert or replay them as new conversations.
     advance(task);
-    // Bound simultaneous host admissions, not agent execution. Once enqueued,
-    // independent sessions run in parallel without waiting for other answers.
     const ready=task.items.filter(x=>x.status==='new');
     async function worker() { let i; while ((i=ready.shift())) { ensureLive(); await dispatch(i); } }
     await Promise.all(Array.from({length:Math.min(4,ready.length)},worker));
@@ -200,15 +212,59 @@ export function createRouter({adapter, journal, infer, navigate, plan=planReques
     const planned=await plan({text:input,settings:structuredClone(effective),sessions:work.forPlan(structuredClone(sessions)),getRecent:recent,infer:classify});
     return {effective,planned};
   }
+  // The list and the task must independently name this session. A stored ID,
+  // creation receipt, or recovered observation alone cannot open a chat. The
+  // pane must also watch the current native scope while it is mounted.
+  function sessionPaneTarget(sid) {
+    if(stopped || !connected || storageFailure || typeof sid!=='string' || !sid) return null;
+    // Compact history can show hundreds of rows. Build the UI index once per
+    // snapshot, not one full journal scan for every row/turn on every redraw.
+    if(paneIndex?.doc!==doc || paneIndex.sessions!==sessions) {
+      const allowed=permitted(doc.settings), rows=new Map(sessions.filter(s=>allowed.has(s.cwd)).map(s=>[s.id,s]));
+      const bound=new Map(), targets=new Map();
+      for(const task of doc.tasks) for(const i of task.items) {
+        if(i.sessionId && rows.has(i.sessionId)) {
+          const row=rows.get(i.sessionId), match=bound.get(i.sessionId)!==false && i.project===row.cwd;
+          bound.set(i.sessionId,match);
+        }
+        if(i.status==='clarify' && Array.isArray(i.candidates)) for(const candidate of i.candidates) {
+          const row=rows.get(candidate);if(candidateAt(i,candidate,row?.cwd)) targets.set(candidate,row.cwd);
+        }
+      }
+      for(const [id,ok] of bound) {if(ok) targets.set(id,rows.get(id).cwd);else targets.delete(id);}
+      paneIndex={doc,sessions,targets};
+    }
+    return paneIndex.targets.get(sid) ?? null;
+  }
+  function saveRemaining(tasks) {
+    // Publish the smaller list only after storage accepted it. No native call:
+    // this is not a cancel, an archive, or a deleteSession operation.
+    const next={...doc,tasks};
+    try { journal.write(next); } catch(e) {storageFailure=e;throw e;}
+    doc=next;emit();
+  }
   const api={
-    getState:view,
+    getState:view, sessionPaneTarget,
+    async removeTask(taskId) {return operation(async()=>{
+      const task=doc.tasks.find(t=>t.id===taskId); if(!task) return 0;
+      if(!canRemoveTask(task) || task.items.some(recoveryId)) throw Error('记录仍在执行、等待回执或需要恢复，未清理。');
+      saveRemaining(doc.tasks.filter(t=>t!==task));return 1;
+    });},
+    async clearCompleted(taskIds=doc.tasks.filter(isCompletedTask).map(t=>t.id)) {
+      if(!Array.isArray(taskIds) || taskIds.some(t=>typeof t!=='string')) throw Error('待清理的记录列表无效。');
+      const confirmed=new Set(taskIds);
+      return operation(async()=>{
+        const keep=doc.tasks.filter(t=>!confirmed.has(t.id) || !isCompletedTask(t));
+        const count=doc.tasks.length-keep.length;if(count) saveRemaining(keep);return count;
+      });
+    },
     subscribe(fn) {listeners.add(fn);return ()=>listeners.delete(fn);},
     async saveSettings(raw) {return operation(async()=>{await resources(); const settings=validateSettings(raw,catalog);doc.settings=settings;change();await roster();notice='设置已保存';emit();});},
     refresh,
     async submit(text) {return operation(async()=>{
       const input=message(text); if(!doc.settings.generalDir) throw Error('先设置通用目录和三个模型档，再发送任务。');
       const {effective,planned}=await preview(input);
-      const task={id:id(),text:input,createdAt:now(),items:materialize(planned,effective,sessions,id)};
+      const task={id:id(),kind:'conversation',text:input,createdAt:now(),items:materialize(planned,effective,sessions,id,input)};
       // The model call may take time; check archive/working-directory changes again.
       await roster(); ensureLive();doc.tasks.unshift(task);change();await pump(task);return task.id;
     });},
@@ -220,13 +276,14 @@ export function createRouter({adapter, journal, infer, navigate, plan=planReques
       const {item}=find(t,k);
       if(item.status!=='clarify' || item.decision!=='clarify' || item.sessionId || item.attempted || item.accepted || item.configured || item.dependsOn?.length) throw Error('只能重新匹配尚未投递、无依赖且正在等待选择的原分项。');
       const {effective,planned}=await preview(message(item.text));
-      if(planned.length!==1 || planned[0].dependsOn?.length) throw Error('新版判断该项需要重新拆分或依赖确认；原任务未改变、未发送。');
       await roster();ensureLive();
-      const [suggested]=materialize(planned,effective,sessions,()=> 'preview');
-      item.candidates=suggested.candidates.slice();item.project=suggested.project;
+      const [suggested]=materialize(planned,effective,sessions,()=> 'preview',message(item.text));
+      item.candidates=suggested.candidates.slice();item.candidateDirs=suggested.candidateDirs;item.project=suggested.project;
       item.tier=suggested.tier;item.selection={...suggested.selection};
       item.reason='重新匹配（未发送）：'+suggested.reason;
-      if(suggested.decision==='reuse' && !item.candidates.includes(suggested.sessionId)) item.candidates.unshift(suggested.sessionId);
+      if(suggested.decision==='reuse' && !item.candidates.includes(suggested.sessionId)) {
+        item.candidates.unshift(suggested.sessionId);item.candidateDirs[suggested.sessionId]=suggested.project;
+      }
       change();
       return suggested.decision==='reuse'?{kind:'reuse',sessionId:suggested.sessionId}:
         suggested.decision==='create'?{kind:'create',project:suggested.project}:null;
@@ -235,7 +292,7 @@ export function createRouter({adapter, journal, infer, navigate, plan=planReques
       const {task,item}=find(t,k);if(item.status!=='clarify') throw Error('该分项现在不需要选择目标。'); await roster();
       if(choice?.kind==='reuse') {
         const s=sessions.find(x=>x.id===choice.sessionId);
-        if(!item.candidates?.includes(choice.sessionId) || !s || item.project && item.project!==s.cwd) throw Error('所选会话不在本项当前候选或原目录中；请重新匹配后再确认。');
+        if(!candidateAt(item,choice.sessionId,s?.cwd,true)) throw Error('所选会话不在本项当前候选或原目录中；请重新匹配后再确认。');
         item.sessionId=s.id;item.project=s.cwd;
       } else if(choice?.kind==='create' && permitted(doc.settings).has(choice.project)) {
         item.project=choice.project;item.sessionId=null;item.selection={...resolveTiers(doc.settings,catalog)[item.tier]};
@@ -257,7 +314,7 @@ export function createRouter({adapter, journal, infer, navigate, plan=planReques
       const {task,item}=find(t,k);const input=message(text);
       if (!item.sessionId || !item.accepted || item.status==='input-required') throw Error('只有已投递并绑定的分项可追问；原会话的审批请在原处处理。');
       await roster();existing(item);
-      const next={id:id(),text:input,parentItemId:k,dependsOn:[],decision:'reuse',project:item.project,tier:item.tier,sessionId:item.sessionId,candidates:[],reason:'直接回复所选分项，沿用原会话和模型。',status:'new',requestId:'ra-'+id()};
+      const next={id:id(),text:input,parentItemId:k,dependsOn:[],decision:'reuse',project:item.project,tier:item.tier,sessionId:item.sessionId,candidates:[],reason:'追问留在原会话，沿用它的模型。',status:'new',requestId:'ra-'+id()};
       task.items.push(next);change();await pump(task);return next.id;
     });},
     async recoverEmpty(t,k,expectedId) {return operation(async()=>{
@@ -289,16 +346,7 @@ export function createRouter({adapter, journal, infer, navigate, plan=planReques
       await roster();if(!item.configured && !item.attempted && item.decision==='create') {await resources();item.selection={...resolveTiers(doc.settings,catalog)[item.tier]};}
       await dispatch(item);
     });},
-    openSession(sid) {return operation(async()=>{
-      // Check the original binding, not just membership in some allowed project.
-      const items=doc.tasks.flatMap(t=>t.items);
-      const ref=items.find(i=>i.sessionId===sid && permitted(doc.settings).has(i.project));
-      await roster();
-      if(ref?.handedOffEmpty) existing(ref); // a read-only recovery receipt is not navigation authority
-      else if(ref) await checkObservationTarget(ref);
-      else if(!items.some(i=>i.status==='clarify' && i.candidates.includes(sid)) || !sessions.some(s=>s.id===sid)) throw Error('未找到许可范围内的会话或候选。');
-      await navigate(sid);
-    });},
+
     async tick() {return operation(async()=>{
       if(!doc.tasks.some(t=>t.items.some(i=>observing.has(i.status) || ['new','dispatching'].includes(i.status)))) return;
       await roster();await reconcile(false);

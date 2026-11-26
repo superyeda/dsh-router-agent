@@ -1,7 +1,8 @@
 {
   "name": "dsh-router-agent",
-  "version": "0.1.5",
-  "description": "跨项目匹配、拆分、投递并跟踪 DSH 会话任务的个人总入口",
+  "version": "0.2.0",
+  "description": "一次对话对应一个 DSH 会话：跨项目路由、紧凑任务记录和页内原会话侧栏",
+  "repository": {"type": "git", "url": "git+https://github.com/superyeda/dsh-router-agent.git"},
   "type": "module",
   "main": "./src/host/index.mjs",
   "exports": {
@@ -32,7 +33,13 @@
         "@deepseek-ai/dsh-client-ui-renderer",
         "@deepseek-ai/dsh-client-ui-layout",
         "@deepseek-ai/dsh-client-ui-sidebar",
-        "@deepseek-ai/dsh-client-ui-workspace"
+        "@deepseek-ai/dsh-client-ui-workspace",
+        "@deepseek-ai/dsh-client-connection",
+        "@deepseek-ai/dsh-api-session-controller",
+        "@deepseek-ai/dsh-api-workspace-controller",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-chat"
       ]
     }
   },

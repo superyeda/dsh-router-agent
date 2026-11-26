@@ -1,14 +1,15 @@
 #!/bin/sh
-# Run: sh scripts/dsh-runtime-smoke/run.sh [--compare-0.1.{0,1,2} version.tgz]... [path/to/.app]
+# Run: sh scripts/dsh-runtime-smoke/run.sh [--ledger-only] [--compare-0.1.{0,1,2} version.tgz]... [path/to/.app]
 # No npm install, profile patch, launched GUI, HTTP listener, or real provider.
 set -eu
 export PATH=/usr/bin:/bin
 umask 077
 here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
 repo=$(CDPATH= cd -- "$here/../.." && pwd -P)
-legacy= legacy_host= legacy_routing=
+legacy= legacy_host= legacy_routing= ledger_only=
 while [ "$#" -gt 0 ]; do
   case "$1" in
+    --ledger-only) ledger_only=yes; shift ;;
     --compare-0.1.0) legacy=${2:?pass the original 0.1.0 tgz}; shift 2 ;;
     --compare-0.1.1) legacy_host=${2:?pass the original 0.1.1 tgz}; shift 2 ;;
     --compare-0.1.2) legacy_routing=${2:?pass the original 0.1.2 tgz}; shift 2 ;;
@@ -60,8 +61,11 @@ phase() {
   "$app/Contents/MacOS/DeepSeek Harness" --expose-internals "$root/probe.mjs"
 }
 # For a genuine cold restore, only disk survives between two Electron PIDs.
-if [ -n "$legacy_host" ]; then phase old-host-seed; fi
-phase current
-# Independent deployment: host inherits PTC, can explicitly create standard.
-phase routing
-phase routing-cold
+if [ -z "$ledger_only" ]; then
+  if [ -n "$legacy_host" ]; then phase old-host-seed; fi
+  phase current
+  # Independent deployment: host inherits PTC, can explicitly create standard.
+  phase routing
+  phase routing-cold
+fi
+phase ledger

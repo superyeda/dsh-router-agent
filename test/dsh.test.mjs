@@ -127,6 +127,33 @@ test('workspace baseline yields real paths; list returns only confirmed nonblank
   await assert.rejects(adapter.cursor('ok'),/授权/);
 });
 
+test('opening native chat needs the exact visible row and fresh archive / directory / active proof; no history or mutation', async () => {
+  const {adapter,remote,f}=fixture(), signal=new AbortController().signal;
+  await adapter.listSessions([A]);
+  for(const [id,cwd] of [['foreign',A],['a',B],['b',A]]) await assert.rejects(adapter.inspectPaneTarget(id,cwd,signal));
+  assert.deepEqual(f.states,[]);
+  assert.deepEqual(await adapter.inspectPaneTarget('a',A,signal),{active:true});
+  f.live={active:false};assert.deepEqual(await adapter.inspectPaneTarget('a',A,signal),{active:false});
+  const state=remote.session.state;remote.session.state=async(...args)=>{const value=await state(...args); f.archives=['a'];return value;};
+  await assert.rejects(adapter.inspectPaneTarget('a',A,signal),/归档/);
+  f.archives=[];await adapter.listSessions([A]);
+  f.exact.set('a',{kind:'cached',values:{workingDirectory:A}});
+  await assert.rejects(adapter.inspectPaneTarget('a',A,signal),/实际工作目录/);
+  assert.equal(f.pages.length+f.creates.length+f.configs.length+f.prompts.length+f.nativeWrites,0);
+  const recovery=await setupRecovery();
+  await recovery.adapter.bindRecoveryObservation(A,key,recoveryId);
+  await assert.rejects(recovery.adapter.inspectPaneTarget(recoveryId,A,signal),/授权/);
+});
+
+test('pane close aborts its own preflight and never requests the next private source',async()=>{
+  const {adapter,remote,f}=fixture(), cancel=new AbortController(), entered=deferred(), release=deferred();
+  await adapter.listSessions([A]);
+  remote.session.projections=async(_request,signal)=>{entered.resolve(signal);await release.promise;return ok({kind:'sequenced',asOfSeq:88,values:{workingDirectory:A}});};
+  const inspecting=adapter.inspectPaneTarget('a',A,cancel.signal);
+  const wireSignal=await entered.promise; cancel.abort(); assert.equal(wireSignal.aborted,true);
+  release.resolve(); await assert.rejects(inspecting); assert.deepEqual(f.states,[]);assert.deepEqual(f.pages,[]);
+});
+
 test('recent returns only three bounded human prompt texts, never tool/context/assistant/attachments', async () => {
   const {adapter,f} = fixture(); await adapter.listSessions([A]);
   f.log = [prompt('one','过早'),prompt('two','第二'),prompt('three','第三'),

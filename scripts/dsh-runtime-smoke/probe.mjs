@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path'
 import { readFile, stat } from 'node:fs/promises'
 import { checkProductionPanel } from './panel.mjs'
 import { routingModels } from './routing.mjs'
+import { installStockSessions } from './stock-session.mjs'
 import { assertStartup, reproduceOldHost, checkRecovery, checkChangedLive, legacyRequest } from './startup.mjs'
 
 const scratch = dirname(fileURLToPath(import.meta.url))
@@ -89,7 +90,8 @@ async function main() {
   // Use the installed standard preset row definitions, not guessed configs.
   // The full web/stdio profile demands network/tool providers; none are booted.
   const {entryListSchema} = await pkg('cordis-plugin-include')
-  const routePhase = ['routing','routing-cold'].includes(process.env.DSH_SMOKE_PHASE)
+  const ledger = process.env.DSH_SMOKE_PHASE==='ledger'
+  const routePhase = ledger || ['routing','routing-cold'].includes(process.env.DSH_SMOKE_PHASE)
   const {load} = req('js-yaml'), enabled = new Set(['persona','agent-instructions','time-context','tool-todo'])
   const presets = await Promise.all((routePhase ? ['standard','ptc'] : ['standard']).map(async id => {
     const filename = req.resolve('@deepseek-ai/dsh-web-app/presets/' + id + '.patch.yml')
@@ -133,7 +135,9 @@ async function main() {
 
   // Real browser-facing codec/envelope paths. A Request is just data here:
   // the two carrier hooks are pure in-process dispatch; fetch() is never used.
-  const owner = host.connection.createPeer({principal: {kind: 'owner'}, interactions: 'none'})
+  await mount(host,'dsh-api-remotes') // genuine connection generation and forwarded Session list/status events
+  const participation = 'answer'
+  const owner = host.connection.createPeer({principal: {kind: 'owner'}, interactions: participation})
   stage = '0.1.1 desktop initialization control'
   const {default: policy} = await pkg('dsh-tool-subagent/model-selection-settings')
   const coldSeed = process.env.DSH_SMOKE_PHASE === 'old-host-seed'
@@ -155,22 +159,25 @@ async function main() {
   await host.plugin(routerHost)
   assert.ok(host.typert.getPackage('dsh-router-agent', 'host'))
   const handler = host.connection.createSharedFetchHandler('/api')
-  const endpoints = []
-  await client.plugin(ctx => installConnection(ctx, {interactions: 'none', transport: {
+  const endpoints = [], streams=[]
+  await client.plugin(ctx => installConnection(ctx, {interactions: participation, transport: {
     fetch(route, init) {
       endpoints.push(route)
       return handler.fetch(new Request(new URL(route, 'http://smoke.invalid/'), init), owner)
     },
     async *openStream(endpoint, payload, signal, uplink) {
+      if (ledger) streams.push({endpoint,payload})
       yield* await host.typertGateway.wireStream.open(endpoint, payload, uplink, owner, signal)
     },
   }}))
   await mount(client, 'dsh-typert-registry/client')
   await mount(client, 'dsh-api-gateway/client')
-  for (const p of apiPackages) await client.remote.$mount((await pkg(p + '/remote')).default)
+  for (const p of apiPackages) if (!ledger || p!=='dsh-api-remote-access') await client.remote.$mount((await pkg(p + '/remote')).default)
+  stage='install stock Session / Workspace clients'
+  const installDesktop=await installStockSessions({client,host,req,pkg})
   if (routePhase) {
-    stage = 'three-tier production form / repeat-work session / independent presets'
-    await checkProductionPanel({client, Service, host, endpoints, calls, provider, cwd, defaultModel, targetModel, replyText, routing})
+    stage = ledger ? 'single delivery / compact journal / original live Session pane' : 'three-tier production form / repeat-work session / independent presets'
+    await checkProductionPanel({client, Service, host, endpoints, calls, provider, cwd, defaultModel, targetModel, replyText, routing, installDesktop, streams})
     return
   }
   const withdrawRootProbe = await client.remote.$mount(routerAgentRemoteContribution)

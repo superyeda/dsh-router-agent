@@ -60,32 +60,24 @@ export function message(raw, max = 8000) {
 }
 export function excerpt(s, n) { s = String(s ?? ''); return s.length <= n ? s : s.slice(0,n-8) + '\n…（已截短）'; }
 
-// Check planner output again at the side-effect boundary. Never let a fabricated
-// id/path become an address. Invalid dependency graphs must not be half-executed.
-export function materialize(plan, settings, sessions, id) {
-  if (!Array.isArray(plan) || !plan.length || plan.length > 24) throw Error('无法生成安全的分项计划；未投递。请缩短或分开发送。');
-  const byKey = new Map(), converted = new Map(), allowed = permitted(settings);
-  for (const p of plan) {
-    if (!p || typeof p.key !== 'string' || !p.key || byKey.has(p.key) || !Array.isArray(p.dependsOn) || !TIER_NAMES.includes(p.tier) || !['create','clarify','reuse'].includes(p.decision)) throw Error('分项计划格式无效，未投递。');
-    byKey.set(p.key,p); converted.set(p.key,id());
-  }
-  const seen = new Set(), stack = new Set();
-  const visit = k => {
-    if (!byKey.has(k) || stack.has(k)) throw Error('分项依赖缺失或形成循环，未投递。');
-    if (seen.has(k)) return; stack.add(k); for (const x of byKey.get(k).dependsOn) visit(x); stack.delete(k); seen.add(k);
-  };
-  for (const k of byKey.keys()) visit(k);
-  return plan.map(p => {
-    const session = sessions.find(s => s.id === p.sessionId && allowed.has(s.cwd));
-    let decision = p.decision;
-    const project = p.project ?? (decision === 'create' ? settings.generalDir : decision === 'reuse' ? session?.cwd : null);
-    if (decision !== 'clarify' && (!allowed.has(project) || (decision === 'reuse' && session?.cwd !== project))) decision='clarify';
-    const candidates = sessions.filter(s => allowed.has(s.cwd) && (p.candidates ?? []).includes(s.id)).map(s=>s.id);
-    const mode=creationMode(settings.sessionMode);
-    return {id:converted.get(p.key), text:message(p.text), dependsOn:[...new Set(p.dependsOn)].map(k=>converted.get(k)), decision,
-      project:allowed.has(project) ? project : null, tier:p.tier, sessionId:decision==='reuse'?session.id:null, candidates,
-      reason:decision!==p.decision?'目标不在当前许可范围，请重新选择。':excerpt(p.reason,500), status:'new',
-      requestId:'ra-'+id(),createKey:'ra-'+id(),selection:{...settings.tiers[p.tier]},
-      ...(decision==='reuse'?{}:{sessionMode:mode,...(mode==='inherit'?{}:{agentPreset:mode})})};
-  });
+// A planner chooses only the destination. New submissions cannot produce a
+// graph, handoff, second destination or replacement for the user's message.
+// Old v1 journal records are read directly; they are never re-materialized.
+export function materialize(plan, settings, sessions, id, original) {
+  if (!Array.isArray(plan) || plan.length!==1) throw Error('每次提交只能路由到一个会话；计划无效，未投递。');
+  const p=plan[0];
+  if (!p || typeof p.key!=='string' || !p.key || !Array.isArray(p.dependsOn) || p.dependsOn.length || !TIER_NAMES.includes(p.tier) || !['create','clarify','reuse'].includes(p.decision)) throw Error('单会话路由无效，未投递。');
+  const text=message(original);
+  if (p.text!==text) throw Error('路由未完整保留原始消息，未投递。');
+  const allowed=permitted(settings), session=sessions.find(s=>s.id===p.sessionId && allowed.has(s.cwd));
+  let decision=p.decision;
+  const project=p.project ?? (decision==='create' ? settings.generalDir : decision==='reuse' ? session?.cwd : null);
+  if (decision!=='clarify' && (!allowed.has(project) || (decision==='reuse' && session?.cwd!==project))) decision='clarify';
+  const offered=sessions.filter(s=>allowed.has(s.cwd) && (!project || project===s.cwd) && Array.isArray(p.candidates) && p.candidates.includes(s.id));
+  const candidates=offered.map(s=>s.id), candidateDirs=Object.fromEntries(offered.map(s=>[s.id,s.cwd]));
+  const mode=creationMode(settings.sessionMode);
+  return [{id:id(),text,dependsOn:[],decision,project:allowed.has(project)?project:null,tier:p.tier,sessionId:decision==='reuse'?session.id:null,candidates,candidateDirs,
+    reason:decision!==p.decision?'目标不在当前许可范围，请重新选择。':excerpt(p.reason,500),status:'new',
+    requestId:'ra-'+id(),createKey:'ra-'+id(),selection:{...settings.tiers[p.tier]},
+    ...(decision==='reuse'?{}:{sessionMode:mode,...(mode==='inherit'?{}:{agentPreset:mode})})}];
 }

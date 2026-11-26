@@ -21,6 +21,10 @@ export function panelDOM(settings, restored) {
     set textContent(value) { this.replaceChildren(); this.data = String(value) }
     get textContent() { return this.data + this.children.map(n => n.textContent).join('') }
     setAttribute(k,v) { this.attrs[k] = String(v); changed() }
+    getAttribute(k) { return this.attrs[k] ?? null }
+    get parentElement() { return this.parent || null }
+    get parentNode() { return this.parentElement }
+    contains(n) { return n === this || this.children.some(c => c.contains(n)) }
     removeAttribute(k) { delete this.attrs[k] }
     append(...nodes) { for (const n of nodes) this.insertBefore(n, null) }
     insertBefore(n, before) { n.remove(); this.children.splice(before ? this.children.indexOf(before) : this.children.length, 0, n); n.parent = this; changed() }
@@ -47,10 +51,15 @@ export function panelDOM(settings, restored) {
     input.value = text; input.dispatchEvent(new Event('input'))
     form.dispatchEvent(new Event('submit', {cancelable: true}))
   }
-  const item = text => {
+  const task = text => {
     const tasks = JSON.parse(store.get(journalKey)).tasks
-    return (text === undefined ? tasks[0] : tasks.find(t => t.text === text))?.items?.[0]
+    return text === undefined ? tasks[0] : tasks.find(t => t.text === text)
   }
-  return {win, root, until, changed, item, ready, submit, snapshot: () => store.get(journalKey)}
-
+  const item = text => task(text)?.items?.[0]
+  const visible = n => { for (; n; n=n.parentElement) if (n.hidden) return false; return true }
+  async function click(predicate,scope=root,label='visible control') {
+    const node = await until(() => scope.find(n => n.tag==='button' && visible(n) && !n.disabled && predicate(n)), label)
+    node.dispatchEvent(new Event('click',{cancelable:true,bubbles:true}))
+  }
+  return {win, root, until, changed, item, task, ready, submit, visible, click, snapshot: () => store.get(journalKey)}
 }

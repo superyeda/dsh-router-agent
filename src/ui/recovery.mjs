@@ -43,7 +43,7 @@ export function createEmptyRecovery(ctx, taskId, itemId, feedback) {
   function update(item) {
     if (reviewed && !matches(item,reviewed)) {
       reviewed=null;
-      if (!ctx.busy(feedback)) msg(feedback,'恢复预览已失效：子项状态、原目录或预期会话 ID 已变更。请重新核对。','amber');
+      if (!ctx.busy(feedback)) msg(feedback,'恢复预览已失效：记录状态、原目录或预期会话 ID 已变更。请重新核对。','amber');
     }
     if (submitted && !matches(item,submitted)) submitted=null;
     node.hidden=item?.recoverableEmpty!==true;

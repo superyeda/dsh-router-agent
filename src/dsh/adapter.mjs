@@ -116,8 +116,8 @@ export function createDshAdapter(remote) {
     checked(s, cwd);
     return cwd;
   }
-  async function currentProjection(s, id) {
-    return unpack(await remote.session.projections({sessionId: id}, s.abort.signal), '核对会话当前工作目录');
+  async function currentProjection(s, id, signal = s.abort.signal) {
+    return unpack(await remote.session.projections({sessionId: id}, signal), '核对会话当前工作目录');
   }
   function forget(s, id) {
     if (s !== scope) return;
@@ -133,16 +133,16 @@ export function createDshAdapter(remote) {
     // rc.5 SessionSummary from the last authorized roster, never a placeholder.
     if (s.recoveryHeaders.get(id) !== cwd) throw Error('最近一次授权的会话列表中无此目录的普通恢复目标。');
   }
-  async function verifyLiveDirectory(s, id, cwd) {
+  async function verifyLiveDirectory(s, id, cwd, signal = s.abort.signal) {
     checked(s, cwd);
-    const {archived} = await baseline(remote, s.abort.signal);
-    checked(s, cwd);
+    const {archived} = await baseline(remote, signal);
+    signal.throwIfAborted(); checked(s, cwd);
     if (archived.has(id)) {
       forget(s, id);
       throw Error('该会话现已归档；不会读取、配置或投递。');
     }
-    const projection = await currentProjection(s, id);
-    checked(s, cwd);
+    const projection = await currentProjection(s, id, signal);
+    signal.throwIfAborted(); checked(s, cwd);
     if (!sameDirectory(projection, cwd)) {
       forget(s, id);
       throw Error('会话实际工作目录已改变，或无法核实；不会读取、配置或投递。');
@@ -159,8 +159,8 @@ export function createDshAdapter(remote) {
     if (!remote.routerAgent) throw Error('路由器宿主插件未加载；不会回退至会修改宿主默认模型的接口。');
     return remote.routerAgent;
   }
-  const readState = async (s, id) => {
-    const state = unpack(await remote.session.state({sessionId: id}, s.abort.signal), '读取会话状态');
+  const readState = async (s, id, signal = s.abort.signal) => {
+    const state = unpack(await remote.session.state({sessionId: id}, signal), '读取会话状态');
     if (!validCursor(state?.cursor)) throw Error('宿主未返回有效会话游标。');
     return state;
   };
@@ -341,6 +341,29 @@ export function createDshAdapter(remote) {
         return visible;
       })();
       try { return await s.lookup; } finally { s.lookup = null; }
+    },
+
+    // A journal/creation/recovery receipt (even observation-only) does not
+    // authorize opening native chat. Require the exact latest *visible* row.
+    // rc.5 native retain requests follow({activate:true}); tell the caller
+    // whether opening would promote a cold Agent. This check never wakes one.
+    async inspectPaneTarget(id, cwd, cancel) {
+      const s = scope, signal = AbortSignal.any([s.abort.signal, cancel]);
+      if (s.lookup) await s.lookup;
+      const eligible = () => {
+        signal.throwIfAborted();
+        if (grant(s, id, 'recent') !== cwd) throw Error('此会话不在所选目录的授权候选中。');
+      };
+      eligible();
+      await verifyLiveDirectory(s, id, cwd, signal);
+      eligible();
+      const state = await readState(s, id, signal);
+      eligible();
+      if (typeof state.active !== 'boolean') throw Error('不能确认原会话是否已载入。');
+      // That passive state call can outlive an archive or directory change.
+      await verifyLiveDirectory(s, id, cwd, signal);
+      eligible();
+      return {active:state.active};
     },
 
     async recent(id) {

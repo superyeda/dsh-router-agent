@@ -14,8 +14,10 @@ function loadClient() {
   let row; const requests=[];
   vm.runInNewContext(source,{window:{__ModuleLoader__:{load:r=>{assert.equal(row,undefined);row=r;}}},TextEncoder,AbortSignal});
   assert.equal(row.id,manifest.name);
-  const plugin=row.factory(name=>{requests.push(name);assert.equal(name,'react');return {createElement(){}};});
-  assert.deepEqual(requests,['react']);return plugin;
+  const plugin=row.factory(name=>{requests.push(name);
+    if(name==='react-dom')return {createPortal(){},flushSync(fn){fn();}};
+    assert.equal(name,'react');return {createElement(type,props,...children){return {type,props,children};}};});
+  assert.deepEqual(requests.sort(),['react','react-dom']);return plugin;
 }
 function clientScope(plugin,owner) {
   const events=[],mounts=new Map(),properties=new Set();let mounted,gate;
@@ -40,7 +42,15 @@ test('distributed bundle uses the injected consumer fiber, then releases it befo
   assert.equal(ctx.mounted.package,manifest.name);assert.equal(JSON.stringify(ctx.mounted.descriptors.map(x=>x.id)),JSON.stringify(routerAgentHostContribution.invocations.map(x=>x.id)));
   assert.deepEqual([...ctx.properties].sort(),['remote.remoteAccess','remote.routerAgent','remote.session','remote.workspace']);
   assert.equal(ctx.mounts.get('main').d.key,ctx.mounts.get('sidebar.panellist').d.id);assert.equal(ctx.mounts.get('sidebar.panellist').d.label(),'任务路由');assert.equal(typeof ctx.mounts.get('main').d.inject().connectRouter,'function');
-  await stop();assert.deepEqual(ctx.events,['rpc+','child+','sidebar.panellist-','main-','child-','rpc-']);
+  const pane=ctx.mounts.get('routerAgent.sessionPane');
+  assert.equal(ctx.mounts.get('main').d.children['routerAgent.sessionPane'].scope,'session');
+  const renderFactorySlot=(name,input,{slots})=>{
+    assert.equal(name,'conversation.content');assert.equal(input.variant,'embedded');assert.equal(input.hero,false);
+    return slots.views({renderSlot:(slot,{view})=>slot+':'+view});
+  };
+  assert.equal(pane.component({sessionId:'selected',expectedSessionId:'selected',renderFactorySlot}),'conversation.session:chat');
+  assert.equal(pane.component({sessionId:'wrong-main-view',expectedSessionId:'selected',renderFactorySlot:assert.fail}).type,'p');
+  await stop();assert.deepEqual(ctx.events,['rpc+','child+','sidebar.panellist-','routerAgent.sessionPane-','main-','child-','rpc-']);
 });
 test('non-owner without access never mounts the board or reads its local journal',async()=>{
   const plugin=loadClient(),ctx=clientScope(plugin,false);const stop=await plugin.apply(ctx.parent);
