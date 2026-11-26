@@ -68,6 +68,39 @@ export const css = `
 .dshr .rt-items,.dshr .rt-projects {display:grid;gap:12px}
 .dshr .rt-task-list {max-height:clamp(260px,66dvh,880px);overflow:auto;overscroll-behavior:contain;scrollbar-gutter:stable;border:1px solid var(--rt-line);border-radius:12px;background:var(--rt-paper)}
 .dshr .rt-task-list:focus-visible {outline:3px solid var(--rt-focus);outline-offset:2px}
+/* Respond to the ledger's own width: it also shares the workbench with the side pane. */
+.dshr .rt-task-list {container:rt-ledger / inline-size}
+.dshr .rt-ledger-branch,.dshr .rt-ledger-heading,.dshr .rt-ledger-children {min-width:0}
+.dshr .rt-ledger-project+.rt-ledger-project {border-block-start:1px solid var(--rt-line)}
+.dshr .rt-ledger-row {display:flex;align-items:center;flex-wrap:wrap;gap:2px 6px;padding:3px 7px}
+.dshr .rt-ledger-heading {flex:1 1 13rem}
+.dshr .rt-ledger-toggle {display:flex;align-items:center;gap:10px;width:100%;min-width:0;min-height:42px;appearance:none;border:0;border-radius:6px;padding:7px 5px;background:transparent;color:var(--rt-ink);font:inherit;text-align:start;cursor:pointer}
+.dshr .rt-ledger-toggle:hover {background:var(--rt-soft)}.dshr .rt-ledger-toggle:focus-visible {outline-offset:-2px}
+.dshr .rt-ledger-caret {display:grid;place-items:center;flex:none;width:11px;color:var(--rt-accent)}
+.dshr .rt-ledger-caret::after {content:"";width:7px;height:7px;border-right:2px solid;border-bottom:2px solid;transform:rotate(-45deg)}
+.dshr .rt-ledger-toggle[aria-expanded=true]>.rt-ledger-caret::after {transform:rotate(45deg)}
+.dshr .rt-ledger-copy {display:grid;flex:1 1 0;min-width:0;gap:2px}
+.dshr .rt-ledger-title {display:flex;align-items:baseline;gap:7px;min-width:0}
+.dshr .rt-ledger-kind {flex:none;font-size:11px;font-weight:600;line-height:1.4;color:var(--rt-accent)}
+.dshr .rt-ledger-name,.dshr .rt-ledger-detail,.dshr .rt-ledger-count {min-width:0;overflow-wrap:anywhere;unicode-bidi:isolate}
+.dshr .rt-ledger-name {font-weight:680}.dshr .rt-ledger-detail {color:var(--rt-muted);font-size:12px;font-weight:400;line-height:1.4}
+.dshr .rt-ledger-meta {display:flex;flex:0 1 auto;max-width:45%;align-items:center;justify-content:flex-end;flex-wrap:wrap;gap:3px 6px}
+.dshr .rt-ledger-count,.dshr .rt-ledger-state {font-size:12px;line-height:1.45;font-weight:500;font-variant-numeric:tabular-nums;color:var(--rt-muted)}
+.dshr .rt-ledger-state {padding:1px 7px;border-radius:99px;white-space:nowrap}
+.dshr .rt-ledger-project>.rt-ledger-children {margin:0 8px 9px clamp(14px,3cqw,28px);padding-inline-start:7px;border-inline-start:2px solid var(--rt-line)}
+.dshr .rt-ledger-session+.rt-ledger-session {margin-top:4px}
+.dshr .rt-ledger-session>.rt-ledger-row {border-inline-start:3px solid transparent;border-radius:6px;background:var(--rt-soft)}
+.dshr .rt-ledger-session[data-selected=true]>.rt-ledger-row {border-inline-start-color:var(--rt-meter)}
+.dshr .rt-ledger-session .rt-ledger-toggle:hover {background:var(--rt-paper)}
+.dshr .rt-ledger-open {flex:none;margin-inline-start:auto;font-size:12px;padding:5px 9px}
+.dshr .rt-ledger-session>.rt-ledger-children {margin:3px 0 7px clamp(8px,2cqw,18px);padding-inline-start:4px;border-inline-start:1px solid var(--rt-line)}
+.dshr .rt-ledger-empty {padding:7px 9px}
+@container rt-ledger (max-width:560px) {
+  .dshr .rt-ledger-row {padding:2px 4px}.dshr .rt-ledger-toggle {display:grid;grid-template-columns:11px minmax(0,1fr);gap:3px 6px}
+  .dshr .rt-ledger-meta {grid-column:2;max-width:none;justify-content:flex-start}
+  .dshr .rt-ledger-project>.rt-ledger-children {margin-inline:11px 3px;padding-inline-start:4px}.dshr .rt-ledger-session>.rt-ledger-children {margin-inline-start:7px;padding-inline-start:2px}
+  .dshr .rt-ledger-session .rt-record-meta {flex-wrap:wrap;gap:2px 5px}
+}
 .dshr .rt-task {min-width:0;border-bottom:1px solid var(--rt-line)}.dshr .rt-task:last-child {border-bottom:0}
 .dshr .rt-record-row {display:flex;align-items:center;gap:4px;padding:2px 5px;border-inline-start:3px solid transparent}
 .dshr .rt-record-row:hover,.dshr .rt-task[data-selected=true]>.rt-record-row {background:var(--rt-soft)}

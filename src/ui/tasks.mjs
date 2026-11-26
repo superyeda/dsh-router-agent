@@ -138,14 +138,15 @@ function createItem(ctx, taskId, id) {
   actions.append(jump,retry); top.append(no,badge); card.append(top,title,relation,instruction,fault,choices,transfer,recovery.node,actions,route,savedHandoff,result,followPanel,feedback);
   function update(next, owner, pos) {
     item=next; task=owner; index=pos; draft.label=str(item.text) || '未命名任务';
-    const status=statusOf(item), [label,tone]=STATUS.get(status), bound=ctx.sessions.get(item.sessionId);
+    const status=statusOf(item), [label,tone]=STATUS.get(status), live=ctx.sessions.get(item.sessionId);
+    const bound=ctx.online && live?.cwd===item.project ? live : null;
     const children=list(task.items), parts=children.filter(i=>!i.parentItemId), follows=children.filter(i=>i.parentItemId);
     function itemName(i) {return i.parentItemId?'追问 '+(follows.indexOf(i)+1):parts.length>1?'历史分项 '+(parts.indexOf(i)+1):'原任务';}
     text(no,itemName(item)); text(badge,label); badge.setAttribute('data-tone',tone); card.setAttribute('data-status',status); card.setAttribute('data-item-id',id);
     // task.text is shown in full once above the routing facts. Preserve differing legacy text.
     title.hidden=!item.parentItemId && parts.length===1 && item.text===task.text; text(title,title.hidden?'':item.text || '未命名任务');
     top.hidden=children.length===1;
-    text(project,item.project || bound?.cwd || '尚待明确');
+    text(project,item.project || '尚待明确');
     const band=TIERS.find(([k])=>k===item.tier)?.[1] || item.tier || '尚待明确';
     const isReuse=item.decision==='reuse' || !!item.parentItemId;
     text(decision,isReuse?'复用原会话':item.decision==='create'?'新建会话':item.decision==='clarify'?'待选择':'未记录');
@@ -174,7 +175,7 @@ function createItem(ctx, taskId, id) {
     choices.hidden=status!=='clarify';review.hidden=reviewInfo.hidden=!canReview(item) || typeof ctx.api.reviewRoute!=='function';review.disabled=unavailable();
     if (!choices.hidden) {
       const candidates=[...new Set(list(item.candidates))];
-      const rows=candidates.map(sid=>{const s=ctx.sessions.get(sid); return {value:sid,label:s ? (s.title || sid)+' · '+(s.busy?'忙碌':'空闲')+' · '+(s.cwd || sid)+(s.updatedAt?' · '+dateLabel(s.updatedAt):'')+' · '+sid : sid+'（资料未同步）'};});
+      const rows=candidates.map(sid=>{const row=ctx.sessions.get(sid),s=ctx.online && candidateAt(item,sid,row?.cwd)?row:null; return {value:sid,label:s ? (s.title || sid)+' · '+(s.busy?'忙碌':'空闲')+' · '+(s.cwd || sid)+(s.updatedAt?' · '+dateLabel(s.updatedAt):'')+' · '+sid : sid+'（资料未同步）'};});
       options(reuse,withStale(rows,draft.sessionChoice),draft.sessionChoice,'选择候选会话…');
       options(create,withStale(ctx.dirs,draft.dirChoice),draft.dirChoice,'选择目标目录…');
       reuseRow.hidden=!rows.length && !draft.sessionChoice; noCandidates.hidden=!!rows.length;
@@ -229,7 +230,7 @@ let detailSerial=0;
 export function createTask(ctx,id) {
   const {el,button}=ctx.ui, node=el('section','rt-task'), row=el('div','rt-record-row'); node.setAttribute('data-task-id',id);
   let current, target=null, expanded=false;
-  const select=button('',()=>{if(target) ctx.pane.open(target,select); else toggle();},'rt-record-select');
+  const select=button('',()=>{if(!ctx.alive() || select.isConnected===false || !ctx.onBoard) return; if(target) ctx.pane.open(target,select); else toggle();},'rt-record-select');
   const title=el('span','rt-record-title'), meta=el('span','rt-record-meta'), time=el('time'), badge=el('span','rt-badge'), info=el('span','rt-record-info');
   meta.append(badge,time,info); select.append(title,meta);
   const toggleButton=button('展开详情',toggle,'rt-btn rt-quiet rt-record-toggle'); row.append(select,toggleButton);
@@ -239,7 +240,7 @@ export function createTask(ctx,id) {
   const empty=el('p','rt-muted','尚未记录路由或投递状态。');
   detail.append(el('p','rt-label','任务原文'),original,itemsBox,empty,admin); node.append(row,detail);
   function toggle() {
-    if (!current || node.hidden) return;
+    if (!current || !ctx.alive() || !ctx.onBoard || node.isConnected===false || node.hidden) return;
     expanded=!expanded; if (!expanded) ctx.cleanup.leave(id); update(current);
   }
   function update(task) {
@@ -278,5 +279,5 @@ export function createTask(ctx,id) {
     const eligible=canRemoveTask(task); remove.disabled=!eligible || !ctx.cleanup.canAsk() || typeof ctx.api.removeTask!=='function';
     text(policy,eligible?'只删除本机路由记录，保留原会话及其消息。':'这条记录仍需跟踪投递、交接或恢复状态，不能删除。');
   }
-  return {node,update};
+  return {node,update,focus:()=>select.focus()};
 }

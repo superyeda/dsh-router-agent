@@ -18,9 +18,14 @@ class Element extends EventTarget {
   replaceChildren(...nodes){for(const n of [...this.children])n.remove();this.data='';this.append(...nodes);}
   remove(){if(this.parent){const a=this.parent.children;a.splice(a.indexOf(this),1);this.parent=null;}}
   insertBefore(n,next){n.remove();const i=next?this.children.indexOf(next):this.children.length;assert.ok(i>=0);this.children.splice(i,0,n);n.parent=this;}
+  get parentElement(){return this.parent || null;}
+  get parentNode(){return this.parentElement;}
+  contains(n){return this===n || this.children.some(c=>c.contains(n));}
   get isConnected(){return this===this.ownerDocument.root || !!this.parent?.isConnected;}
   focus(){this.ownerDocument.activeElement=this;}
-  click(){if (this.disabled) return; this.dispatchEvent(new Event('click')); if(this.tag==='summary' && this.parent?.tag==='details') this.parent.open=!this.parent.open;}
+  // A successful user interaction must start in attached, disclosed DOM. The
+  // explicit stale/forged-event probes use dispatchEvent and expect no action.
+  click(){assert.ok(visible(this),'cannot click a hidden/detached '+this.tag+': '+this.textContent.slice(0,55));if (this.disabled) return; this.dispatchEvent(new Event('click')); if(this.tag==='summary' && this.parent?.tag==='details') this.parent.open=!this.parent.open;}
 }
 const dom=()=>{const doc={defaultView:new EventTarget(),createElement(tag){return new Element(doc,tag);}};return doc.root=doc.createElement('main');};
 const walk=n=>[n,...n.children.flatMap(walk)];
@@ -29,8 +34,8 @@ const find=(n,pred)=>{const result=walk(n).find(pred);assert.ok(result,'Missing 
 const btn=(n,label)=>find(n,c=>c.tag==='button' && c.textContent===label);
 const control=(n,label)=>find(n,c=>c.tag==='label' && c.children[0]?.textContent===label).children[1];
 const alert=(n,pattern)=>walk(n).some(c=>c.getAttribute('role')==='alert' && visible(c) && pattern.test(c.textContent));
-const fill=(el,value)=>{el.value=value;el.dispatchEvent(new Event(el.tag==='select'?'change':'input'));};
-const submit=el=>{for(let n=el;n;n=n.parent){if(n.tag==='form'){n.dispatchEvent(new Event('submit',{cancelable:true}));return;}}throw Error('No form');};
+const fill=(el,value)=>{assert.ok(visible(el),'cannot edit a hidden/detached '+el.tag);el.value=value;el.dispatchEvent(new Event(el.tag==='select'?'change':'input'));};
+const submit=el=>{assert.ok(visible(el),'cannot submit a hidden/detached form');for(let n=el;n;n=n.parent){if(n.tag==='form'){n.dispatchEvent(new Event('submit',{cancelable:true}));return;}}throw Error('No form');};
 const uiState=()=>({settings:{generalDir:'/general',projects:[{path:'/web',name:'站点'}],tiers:Object.fromEntries(['fast','standard','deep'].map(k=>[k,{provider:'p',model:'m',effort:'low'}]))},
   workspaces:[{path:'/docs',name:'文档'}],catalog:[{provider:'p',model:'m',efforts:['low','high']}],sessions:[],tasks:[],connected:true});
 function fixture(state=uiState(), extra={}){
@@ -47,7 +52,30 @@ const settle=()=>new Promise(r=>setImmediate(r));
 const deferred=()=>{let resolve,reject;const promise=new Promise((yes,no)=>{resolve=yes;reject=no;});return {promise,resolve,reject};};
 const addTask=(state,...items)=>state.tasks.push({id:'t:1',text:'跨项目任务',createdAt:'2026-01-01T00:00:00Z',items});
 const item=(id,status,more={})=>({id,text:id+' 的内容',status,tier:'standard',project:'/web',reason:'按目录选择',candidates:[],dependsOn:[],...more});
-const rowFor=(root,id='t:1')=>find(root,n=>n.getAttribute('data-task-id')===id);
+const groups=(scope,level)=>walk(scope).filter(n=>n.getAttribute('data-ledger-level')===level && visible(n));
+const keyOf=(node,level)=>node.getAttribute('data-ledger-'+level);
+const toggleFor=(group,level)=>find(group,n=>n.tag==='button' && n.getAttribute('data-ledger-toggle')===level && visible(n));
+function setGroup(group,level,open) {
+  const toggle=toggleFor(group,level), expanded=toggle.getAttribute('aria-expanded');
+  assert.ok(expanded==='true' || expanded==='false','disclosure must describe its state');
+  if(expanded!==String(open)) {assert.ok(!toggle.disabled);toggle.click();}
+  assert.equal(toggle.getAttribute('aria-expanded'),String(open));
+}
+const taskRows=scope=>walk(scope).filter(n=>n.getAttribute('data-task-id')!=null);
+// Older cases exercise controls on particular demand leaves. Browse through
+// the actual visible disclosures (including special/legacy buckets); do not
+// assume a path is the project key, or reach into a collapsed/detached leaf.
+function rowFor(root,id='t:1') {
+  const row=scope=>taskRows(scope).find(n=>n.getAttribute('data-task-id')===id && visible(n));
+  let found=row(root);if(found) return found;
+  for(const p of groups(root,'project')) {
+    setGroup(p,'project',true);
+    for(const s of groups(p,'session')) {
+      setGroup(s,'session',true); found=row(s);if(found) return found;
+    }
+  }
+  assert.fail('No visible demand after browsing project and session groups: '+id);
+}
 const expand=(root,id)=>{const row=rowFor(root,id), b=walk(row).find(n=>n.tag==='button' && n.textContent==='展开详情');if(b) b.click();return row;};
 const nodeFor=(root,id,taskId)=>find(expand(root,taskId),c=>c.tag==='article' && c.getAttribute('data-item-id')===id);
 const disclose=(n,label)=>{const s=find(n,c=>c.tag==='summary' && c.textContent===label);if(!s.parent.open) s.click();};
@@ -264,6 +292,9 @@ test('精确恢复预览不能沿用到另一个 ID、另一个目录、已失�
   previewRecovery(n).click();a.expectedSessionId='other';f.emit();assert.ok(!visible(oldConfirm));oldConfirm.dispatchEvent(new Event('click'));assert.deepEqual(calls,[]);
   assert.ok(walk(n).some(el=>el.tag==='p' && visible(el) && el.textContent.includes('恢复预览已失效')));
   previewRecovery(n).click();a.project='/new';f.emit();assert.ok(!visible(oldConfirm));
+  // The saved cwd changed: the demand now lives under another, initially
+  // closed project. Deliberately browse to it before reviewing recovery again.
+  assert.equal(nodeFor(f.root,'a'),n);
   previewRecovery(n).click();f.state.connected=false;f.emit();assert.ok(oldConfirm.disabled);oldConfirm.dispatchEvent(new Event('click'));await settle();assert.deepEqual(calls,[]);
   f.state.connected=true;f.emit();
   // An asynchronously fetched fresh snapshot can race with an intervening subscription.
@@ -318,6 +349,165 @@ const record=(state,id,items,text=id,createdAt=1736000000000)=>{
 };
 const selectRecord=(root,id)=>find(rowFor(root,id),n=>n.tag==='button' && n.getAttribute('data-action'));
 const side=root=>find(root,n=>n.tag==='aside' && n.getAttribute('aria-label')==='原会话侧栏');
+const idsIn=scope=>taskRows(scope).map(n=>n.getAttribute('data-task-id'));
+// Read only a group's visible header. A parent cannot pass because an open
+// child happens to contain a matching path, session id or title in its text.
+function headingText(group) {
+  function own(n) {
+    if(!visible(n) || (n!==group && (n.getAttribute('data-ledger-level') || n.getAttribute('data-task-id')))) return '';
+    return n.data+n.children.map(own).join('');
+  }
+  return own(group);
+}
+function byHeading(scope,level,literal) {
+  const found=groups(scope,level).filter(g=>headingText(g).includes(literal));
+  assert.equal(found.length,1,'expected exactly one visible '+level+' header containing '+literal);return found[0];
+}
+const openOriginal=group=>walk(group).filter(n=>n.tag==='button' && n.getAttribute('data-ledger-open')==='session' && visible(n) && !n.disabled);
+const groupedItem=(id,status,project,sessionId,extra={})=>item(id,status,{decision:'reuse',project,sessionId,accepted:true,...extra});
+
+test('项目与会话分别按最近需求排序；同名分开，同会话的独立提交有两条，追问不生成第三条',async()=>{
+  const s=uiState(),a='/east/site',b='/west/site';
+  s.settings.projects=[{name:'同名项目',path:b},{name:'同名项目',path:a}];
+  s.sessions=[['S-甲',a],['S-乙',a],['S-丙',b]].map(([id,cwd])=>({id,cwd,title:'同名会话'}));
+  // Deliberately neither insertion order nor lexical group order is recency.
+  record(s,'甲一',[groupedItem('root','done',a,'S-甲'),groupedItem('follow','running',a,'S-甲',{parentItemId:'root'})],'第一份独立原文',1710000000100);
+  record(s,'丙一',[groupedItem('root','done',b,'S-丙')],'西项目原文',1710000000250);
+  record(s,'乙一',[groupedItem('root','running',a,'S-乙')],'另一个会话的需求',1710000000200);
+  record(s,'甲二',[groupedItem('root','done',a,'S-甲')],'第二份独立原文',1710000000300);
+  const f=fixture(s), root=f.root, hist=find(root,n=>n.getAttribute('aria-label')==='任务历史');
+  const project=cwd=>byHeading(hist,'project',cwd), session=(cwd,sid)=>byHeading(project(cwd),'session',sid);
+  const expanded=(g,l)=>toggleFor(g,l).getAttribute('aria-expanded');
+  const checkToggle=(g,l)=>{
+    const t=toggleFor(g,l), id=t.getAttribute('aria-controls');assert.equal(t.type,'button');assert.ok(keyOf(g,l));assert.ok(id);
+    assert.equal(walk(root).filter(n=>(n.id||n.getAttribute('id'))===id).length,1,'each disclosure controls one unique region');
+    assert.equal(expanded(g,l),'false');
+  };
+  assert.deepEqual(groups(hist,'project'),[project(a),project(b)]);assert.notEqual(keyOf(project(a),'project'),keyOf(project(b),'project'));
+  for(const p of groups(hist,'project')) {checkToggle(p,'project');assert.match(headingText(p),/同名项目/);}
+  assert.match(headingText(project(a)),/2 个会话 · 3 条需求/);assert.match(headingText(project(a)),/进行中 2/);
+  assert.match(headingText(project(b)),/1 个会话 · 1 条需求/);
+  assert.deepEqual(idsIn(hist),[]);assert.deepEqual(groups(hist,'session'),[]);assert.ok(!hist.textContent.includes('独立原文'));
+  setGroup(project(a),'project',true);assert.deepEqual(groups(project(a),'session'),[session(a,'S-甲'),session(a,'S-乙')]);
+  for(const g of groups(project(a),'session')) {checkToggle(g,'session');assert.match(headingText(g),/同名会话/);}
+  assert.match(headingText(session(a,'S-甲')),/2 条需求/);assert.match(headingText(session(a,'S-甲')),/进行中 1/);
+  assert.deepEqual(idsIn(hist),[]);assert.equal(expanded(project(b),'project'),'false');
+  const aKey=keyOf(project(a),'project'), alphaKey=keyOf(session(a,'S-甲'),'session'), betaKey=keyOf(session(a,'S-乙'),'session');
+  setGroup(session(a,'S-甲'),'session',true);assert.deepEqual(idsIn(hist),['甲二','甲一']);
+  assert.match(selectRecord(root,'甲一').textContent,/1 条追问/);assert.equal(expanded(session(a,'S-乙'),'session'),'false');
+  setGroup(project(b),'project',true);checkToggle(session(b,'S-丙'),'session');setGroup(session(b,'S-丙'),'session',true);
+  const gammaKey=keyOf(session(b,'S-丙'),'session');assert.equal(new Set([alphaKey,betaKey,gammaKey]).size,3);
+  assert.deepEqual(idsIn(hist),['甲二','甲一','丙一']);
+  setGroup(project(b),'project',false);assert.deepEqual(idsIn(hist),['甲二','甲一']);assert.deepEqual(f.calls,[]);
+  const filter=control(root,'按状态筛选');fill(filter,'running');
+  assert.deepEqual(groups(hist,'project'),[project(a)]);assert.equal(keyOf(project(a),'project'),aKey);
+  assert.equal(keyOf(session(a,'S-甲'),'session'),alphaKey);assert.equal(keyOf(session(a,'S-乙'),'session'),betaKey);
+  assert.match(headingText(project(a)),/2 个会话 · 2 条需求/);assert.match(headingText(session(a,'S-甲')),/1 条需求/);
+  assert.deepEqual(idsIn(hist),['甲一'],'filter matches its running follow-up but includes the demand only once');
+  setGroup(session(a,'S-乙'),'session',true);setGroup(session(a,'S-甲'),'session',false);assert.deepEqual(idsIn(hist),['乙一']);
+  btn(root,'刷新状态').click();await settle();f.emit(structuredClone(s));
+  assert.equal(expanded(project(a),'project'),'true');assert.equal(expanded(session(a,'S-甲'),'session'),'false');
+  assert.equal(expanded(session(a,'S-乙'),'session'),'true');assert.deepEqual(idsIn(hist),['乙一']);
+  fill(filter,'');assert.equal(expanded(project(b),'project'),'false');assert.deepEqual(idsIn(hist),['乙一']);
+  setGroup(project(b),'project',true);assert.equal(keyOf(session(b,'S-丙'),'session'),gammaKey);setGroup(session(b,'S-丙'),'session',true);
+  setGroup(session(a,'S-甲'),'session',true);assert.deepEqual(idsIn(hist),['甲二','甲一','乙一','丙一']);
+  assert.deepEqual(f.calls,[['refresh']]);assert.ok(!visible(side(root)));f.dispose();
+});
+
+test('读取失败时已展开分支保留本机需求，但不再展示上次的原生标题或访问权限',()=>{
+  const s=uiState(),sid='sid-roster';s.sessions=[{id:sid,cwd:'/web',title:'实时会话标题'}];
+  record(s,'saved',[groupedItem('entry','done','/web',sid)],'本机保存的需求');let fail=false;
+  const f=fixture(s,{getState:()=>{if(fail) throw Error('读取中断');return s;}}),root=f.root;
+  const project=byHeading(root,'project','/web');setGroup(project,'project',true);
+  const session=byHeading(project,'session',sid);setGroup(session,'session',true);
+  assert.match(headingText(session),/实时会话标题/);assert.equal(openOriginal(session).length,1);
+  fail=true;f.emit();assert.match(headingText(session),/本机保存的需求/);assert.doesNotMatch(headingText(session),/实时会话标题/);
+  assert.deepEqual(idsIn(session),['saved']);assert.deepEqual(openOriginal(session),[]);
+  fail=false;f.emit();assert.match(headingText(session),/实时会话标题/);assert.equal(toggleFor(session,'session').getAttribute('aria-expanded'),'true');
+  assert.deepEqual(f.calls,[]);f.dispose();
+});
+
+test('显式定位提交的需求才会展开、清除不匹配筛选并聚焦，不打开原会话',async()=>{
+  const s=uiState();s.sessions=['first','latest'].map(id=>({id,cwd:'/web',title:'同名'}));
+  record(s,'prior',[groupedItem('old','queued','/web','first')]);const f=fixture(s),root=f.root;
+  const filter=control(root,'按状态筛选'),draft=control(root,'任务内容');fill(filter,'queued');
+  const text='这次通过主表单提交的独立需求';f.api.submit=async raw=>{
+    f.calls.push(['submit',raw]);return record(s,'issued',[groupedItem('new','running','/web','latest')],raw).id;
+  };
+  fill(draft,text);submit(draft);await settle();assert.deepEqual(f.calls,[['submit',text]]);
+  assert.equal(filter.value,'queued');assert.equal(toggleFor(byHeading(root,'project','/web'),'project').getAttribute('aria-expanded'),'false');
+  assert.deepEqual(idsIn(root),[]);assert.deepEqual(groups(root,'session'),[]);
+  btn(root,'定位本次需求').click();assert.equal(filter.value,'');assert.ok(walk(root).some(n=>n.tag==='p' && visible(n) && /已切换到.*全部状态/.test(n.textContent)));
+  assert.deepEqual(idsIn(root),['issued']);const row=taskRows(root)[0];assert.ok(row.contains(root.ownerDocument.activeElement));
+  assert.ok(!visible(side(root)));assert.deepEqual(f.calls,[['submit',text]]);f.dispose();
+});
+
+test('相同 ID 迁往另一 cwd：历史仍可读，组标题、需求详情、候选和侧栏都不能泄露错目录标题或取得挂载权',async()=>{
+  const s=uiState(),old='/old/same',now='/new/same',sid='shared-id',secret='SECRET：仅当前精确目录的原生标题';
+  s.settings.projects=[{path:old,name:'同名项目'},{path:now,name:'同名项目'}];
+  s.sessions=[{id:sid,cwd:now,title:secret},{id:'side-id',cwd:old,title:'可手选目标'}];
+  record(s,'old',[groupedItem('base','done',old,sid)],'原来的本地需求');
+  record(s,'new',[groupedItem('base','running',now,sid)],'现在的需求',1750000000000);
+  record(s,'another',[groupedItem('other','done',now,sid)],'同会话的另一次独立提交',1750100000000);
+  // A clarification can already have a recommended project, candidateDirs,
+  // and an expected id. None is a binding until a target has been chosen.
+  const pending=item('pick','clarify',{decision:'clarify',project:old,expectedSessionId:sid,candidates:[sid,'side-id'],candidateDirs:{[sid]:old,'side-id':old}});
+  record(s,'pick',[pending],'还没有选择去向');
+  let grant=now,unmounted=0;const f=fixture(s,{sessionPaneTarget:id=>id===sid?grant:old,
+    mountSessionPane:(_,id)=>{f.calls.push(['mountSessionPane',id]);return ()=>{unmounted++;};}}),root=f.root;
+  const project=cwd=>byHeading(root,'project',cwd), orig=()=>byHeading(project(old),'session',sid), live=()=>byHeading(project(now),'session',sid);
+  setGroup(project(old),'project',true);setGroup(project(now),'project',true);
+  assert.notEqual(keyOf(orig(),'session'),keyOf(live(),'session'),'session key includes the saved project identity');
+  assert.ok(!headingText(orig()).includes(secret));assert.match(headingText(live()),/SECRET/);assert.deepEqual(openOriginal(orig()),[]);
+  setGroup(orig(),'session',true);assert.deepEqual(idsIn(orig()),['old']);
+  const previous=nodeFor(root,'base','old');disclose(previous,'路由详情');assert.ok(previous.textContent.includes(old));assert.ok(previous.textContent.includes(sid));
+  assert.ok(!previous.textContent.includes(secret));assert.equal(selectRecord(root,'old').getAttribute('data-action'),'view-details');
+  assert.deepEqual(f.calls,[]);assert.ok(!visible(side(root)));
+  const pendingProject=byHeading(root,'project','待归属');setGroup(pendingProject,'project',true);
+  const unbound=byHeading(pendingProject,'session','未绑定');assert.deepEqual(openOriginal(unbound),[]);setGroup(unbound,'session',true);assert.deepEqual(idsIn(unbound),['pick']);
+  const choices=nodeFor(root,'pick','pick'), sel=control(choices,'复用候选会话');assert.ok(!sel.textContent.includes(secret),'a candidate at the wrong cwd is not entitled to a live title');
+  fill(sel,sid);assert.ok(btn(choices,'使用此会话').disabled);assert.ok(btn(choices,'在侧栏查看候选会话').disabled);
+  fill(sel,'side-id');assert.ok(!btn(choices,'使用此会话').disabled);assert.deepEqual(f.calls,[]);
+  // A grant can change between render and click. An old enabled control may
+  // not use a historical id to claim today's session at the wrong cwd.
+  assert.equal(openOriginal(live()).length,1);grant=old;openOriginal(live())[0].click();assert.deepEqual(f.calls,[]);
+  grant=now;f.emit();openOriginal(live())[0].click();assert.deepEqual(f.calls,[['mountSessionPane',sid]]);assert.ok(visible(side(root)));
+  setGroup(live(),'session',true);assert.deepEqual(idsIn(live()),['another','new']);
+  selectRecord(root,'another').click();selectRecord(root,'new').click();assert.deepEqual(f.calls,[['mountSessionPane',sid]]);assert.equal(unmounted,0);
+  // Roster no longer matches the retained original; no stale title may leak,
+  // even when the adapter still vouches for the saved cwd's admitted receipt.
+  s.sessions[0]={id:sid,cwd:old,title:'SECRET：又换了目录'};f.emit();assert.ok(!visible(side(root)));assert.equal(unmounted,1);
+  assert.ok(!side(root).textContent.includes('SECRET：又换了目录'));assert.deepEqual(openOriginal(live()),[]);
+  // Two native rows claiming that id are worse than a temporarily absent
+  // row: even the live authority alone must not select one dialog or title.
+  s.sessions.push({id:sid,cwd:now,title:secret});f.emit();
+  for(const g of [orig(),live()]) {assert.deepEqual(openOriginal(g),[]);assert.ok(!headingText(g).includes('SECRET'));}
+  assert.equal(selectRecord(root,'new').getAttribute('data-action'),'view-details');assert.ok(!previous.textContent.includes('SECRET'));
+  s.sessions.pop();grant=old;s.settings.projects=[{path:now,name:'同名项目'}];f.emit();
+  assert.deepEqual(openOriginal(orig()),[]);assert.ok(!headingText(orig()).includes('SECRET'));assert.ok(!previous.textContent.includes('SECRET'));
+  s.settings.projects.push({path:old,name:'同名项目'});s.connected=false;f.emit();
+  assert.deepEqual(openOriginal(orig()),[]);assert.ok(!headingText(orig()).includes('SECRET'));assert.ok(!previous.textContent.includes('SECRET'));
+  assert.ok(rowFor(root,'old').textContent.includes('原来的本地需求'));assert.equal(selectRecord(root,'old').getAttribute('data-action'),'view-details');
+  s.connected=true;f.emit();fill(sel,'side-id');btn(choices,'使用此会话').click();await settle();
+  assert.deepEqual(f.calls,[['mountSessionPane',sid],['resolve','pick','pick',{kind:'reuse',sessionId:'side-id'}]]);f.dispose();
+});
+
+test('删除最后一条需求会移除空的会话或项目；在途同级保留，查看和手动清理不投递、不导航',async()=>{
+  const s=uiState();s.settings.projects.push({path:'/only',name:'单条项目'});
+  s.sessions=[['solo','/only'],['finished','/web'],['in-flight','/web']].map(([id,cwd])=>({id,cwd}));
+  for(const [id,status,cwd] of [['solo','done','/only'],['finished','done','/web'],['in-flight','queued','/web']])record(s,id,[groupedItem('req',status,cwd,id)]);
+  const before=structuredClone(s.sessions),f=fixture(s), root=f.root,proj=cwd=>byHeading(root,'project',cwd);
+  setGroup(proj('/only'),'project',true);const lone=byHeading(proj('/only'),'session','solo');openOriginal(lone)[0].click();
+  assert.ok(visible(side(root)));assert.deepEqual(f.calls,[['mountSessionPane','solo']]);
+  setGroup(lone,'session',true);const row=expand(root,'solo');btn(row,'删除记录').click();assert.equal(groups(root,'project').length,2);
+  btn(row,'确认删除这条记录').click();await settle();assert.ok(!visible(side(root)));assert.deepEqual(groups(root,'project'),[proj('/web')]);
+  setGroup(proj('/web'),'project',true);const finish=byHeading(proj('/web'),'session','finished'),flight=byHeading(proj('/web'),'session','in-flight');
+  setGroup(flight,'session',true);assert.ok(btn(expand(root,'in-flight'),'删除记录').disabled);assert.deepEqual(idsIn(flight),['in-flight']);
+  setGroup(finish,'session',true);assert.deepEqual(idsIn(finish),['finished']);btn(root,'清理已完成').click();btn(root,'确认清理已完成记录').click();await settle();
+  assert.deepEqual(groups(root,'project'),[proj('/web')]);assert.deepEqual(groups(proj('/web'),'session'),[byHeading(proj('/web'),'session','in-flight')]);
+  assert.deepEqual(idsIn(root),['in-flight']);assert.ok(btn(root,'清理已完成').disabled);assert.deepEqual(s.sessions,before);
+  assert.deepEqual(f.calls,[['mountSessionPane','solo'],['removeTask','solo'],['clearCompleted',['finished']]]);f.dispose();
+});
 
 test('不展开记录也看得见本次新建或续接和实际工作区',()=>{
   const s=uiState();record(s,'one',[item('create','done',{decision:'create',project:'/web'})]);
@@ -329,9 +519,11 @@ test('历史默认只呈现时间、状态和摘要；一段原文只展开一�
   const s=uiState(), raw='检查网站和文档\n  保持格式 '+ '长'.repeat(145), a=item('base','done',{text:raw,result:'完整结果 <b>不解释为 HTML</b>'});
   record(s,'new',[a,item('follow','running',{parentItemId:'base',accepted:true})],raw,1750000000000);
   const old=record(s,'old',[item('up','done'),item('down','done',{dependsOn:['up'],handoff:'原样交接\n不改写',approved:true})],'历史完整原文',1740000000000); delete old.kind;
-  const f=fixture(s), row=rowFor(f.root,'new'), history=find(f.root,n=>n.getAttribute('aria-label')==='任务历史');
-  assert.deepEqual(history.children.map(n=>n.getAttribute('data-task-id')),['new','old']);
-  for(const r of history.children) {
+  const f=fixture(s), history=find(f.root,n=>n.getAttribute('aria-label')==='任务历史');
+  assert.equal(taskRows(history).length,0);assert.equal(groups(history,'session').length,0);
+  const row=rowFor(f.root,'new');rowFor(f.root,'old');
+  const rendered=taskRows(history);assert.deepEqual(rendered.map(n=>n.getAttribute('data-task-id')),['new','old']);
+  for(const r of rendered) {
     assert.equal(btn(r,'展开详情').getAttribute('aria-expanded'),'false');assert.equal(walk(r).filter(n=>n.tag==='article').length,0);
     assert.ok(visible(find(r,n=>n.tag==='time' && n.getAttribute('datetime'))));
   }
@@ -380,7 +572,9 @@ test('清理已完成冻结当前可见 IDs，以确认后的实际数量反馈�
 test('过时的删除确认不能在订阅更新、异步读取、切换页面或卸载后执行',async()=>{
   const s=uiState(), t=record(s,'id',[item('i','clarify')]),f=fixture(s),r=expand(f.root,'id'),ask=btn(r,'删除记录');
   ask.click();const stale=btn(r,'确认删除这条记录');t.items[0].status='unknown';f.emit();assert.ok(!visible(stale));stale.dispatchEvent(new Event('click'));assert.deepEqual(f.calls,[]);
-  t.items[0].status='done';f.emit();ask.click();let g=deferred(),then=structuredClone(s);f.api.getState=()=>g.promise;btn(r,'确认删除这条记录').click();
+  // The original clarify bucket was unassigned. Now it has a saved project;
+  // browse into that project before asking for a new, visible confirmation.
+  t.items[0].status='done';f.emit();btn(expand(f.root,'id'),'删除记录').click();let g=deferred(),then=structuredClone(s);f.api.getState=()=>g.promise;btn(r,'确认删除这条记录').click();
   t.items[0].status='queued';f.emit(s);g.resolve(then);await settle();assert.deepEqual(f.calls,[]);assert.ok(note(f.root,'没有移除记录'));
   t.items[0].status='done';f.emit(s);ask.click();settings(f.root);stale.dispatchEvent(new Event('click'));await settle();assert.deepEqual(f.calls,[]);
   btn(f.root,'任务台').click();ask.click();g=deferred();f.api.getState=()=>g.promise;btn(r,'确认删除这条记录').click();f.dispose();g.resolve(s);await settle();assert.deepEqual(f.calls,[]);
@@ -418,8 +612,11 @@ test('侧栏仅使用最新已授权的绑定或候选；失效标记不降级�
 
 test('无法区分多份旧活动会话时先展示原分项；过期挂载错误不能覆盖新的会话',async()=>{
   const s=uiState();s.sessions=['one','two'].map(id=>({id,cwd:'/web'}));addTask(s,item('a','running',{sessionId:'one'}),item('b','running',{sessionId:'two'}));
-  const pending=deferred(), seen=[];const f=fixture(s,{mountSessionPane:(_,sid)=>{seen.push(sid);return sid==='one'?pending.promise:()=>{};}}),r=rowFor(f.root);
-  const choose=selectRecord(f.root,'t:1');assert.equal(choose.getAttribute('data-action'),'view-details');choose.click();assert.ok(visible(btn(r,'收起详情')));assert.deepEqual(seen,[]);
+  const pending=deferred(), seen=[];const f=fixture(s,{mountSessionPane:(_,sid)=>{seen.push(sid);return sid==='one'?pending.promise:()=>{};}});
+  const p=byHeading(f.root,'project','/web');assert.deepEqual(idsIn(p),[]);setGroup(p,'project',true);
+  const special=byHeading(p,'session','历史多会话');assert.deepEqual(openOriginal(special),[]);assert.deepEqual(idsIn(p),[]);
+  setGroup(special,'session',true);assert.deepEqual(idsIn(p),['t:1']);assert.deepEqual(seen,[]);
+  const r=rowFor(f.root),choose=selectRecord(f.root,'t:1');assert.equal(choose.getAttribute('data-action'),'view-details');choose.click();assert.ok(visible(btn(r,'收起详情')));assert.deepEqual(seen,[]);
   btn(nodeFor(f.root,'a'),'在侧栏查看原会话').click();btn(nodeFor(f.root,'b'),'在侧栏查看原会话').click();pending.reject(Error('过期失败'));await settle();
   assert.ok(visible(side(f.root)));assert.deepEqual(seen,['one','two']);assert.ok(!alert(f.root,/过期失败/));
   s.sessions=[];f.emit();assert.ok(!visible(side(f.root)));assert.deepEqual(f.calls,[]);f.dispose();

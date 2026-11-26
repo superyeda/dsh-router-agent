@@ -1,8 +1,10 @@
 import { css } from './style.mjs';
 import { isAutomaticRoute } from '../core/route-mode.mjs';
-import { STATUS, list, str, statusOf, matchesFilter, recordCaption, candidateAt, pairKey, catalogEntries, directoryOptions, checkSettings, uiKit, text, val, msg, options, order, shortcut, errorMessage } from './shared.mjs';
+import { STATUS, list, str, statusOf, matchesFilter, recordCaption, candidateAt, pairKey, catalogEntries, directoryOptions, checkSettings, uiKit, text, val, msg, options, shortcut, errorMessage } from './shared.mjs';
 import { createSettings } from './settings.mjs';
 import { createTask, hasItemDraft } from './tasks.mjs';
+import { groupLedger } from './ledger-groups.mjs';
+import { createLedgerTree } from './ledger-tree.mjs';
 import { canRemoveTask, isCompletedTask } from '../core/record-policy.mjs';
 
 // Unsaved text stays in memory. Verified hosts may share an object across remounts for one
@@ -26,10 +28,12 @@ function createSessionDock(ctx) {
     const item=list(task.items).find(i=>i.id===ref.itemId);
     if(!item || (ctx.filter && statusOf(item)!==ctx.filter) || (ref.kind==='candidate' ? item.status!=='clarify' || !list(item.candidates).includes(ref.sid) : ref.kind!=='bound' || item.sessionId!==ref.sid)) return null;
     // Never substitute an old journal sessionId, a title, or a recovery hint for actual authority.
-    let cwd;
-    try {cwd=typeof ctx.api.sessionPaneTarget==='function' ? ctx.api.sessionPaneTarget(ref.sid) : ctx.sessions.get(ref.sid)?.cwd;}
+    const row=ctx.sessions.get(ref.sid);let cwd;
+    try {cwd=typeof ctx.api.sessionPaneTarget==='function' ? ctx.api.sessionPaneTarget(ref.sid) : row?.cwd;}
     catch {return null;}
-    return typeof cwd==='string' && ctx.dirs.some(d=>d.value===cwd) && (ref.kind==='candidate' ? candidateAt(item,ref.sid,cwd) : item.project===cwd) ? cwd : null;
+    // A real-time verified grant can arrive before a roster snapshot. An
+    // explicit contradictory/ambiguous snapshot, however, is not absence.
+    return typeof cwd==='string' && (!ctx.rosterIds.has(ref.sid) || row?.cwd===cwd) && ctx.dirs.some(d=>d.value===cwd) && (ref.kind==='candidate' ? candidateAt(item,ref.sid,cwd) : item.project===cwd) ? cwd : null;
   }
   function release(fn) {
     if (typeof fn==='function') {
@@ -49,14 +53,18 @@ function createSessionDock(ctx) {
     if(target(current.ref)!==current.cwd) {
       close(); if(ctx.onBoard) msg(notice,'已关闭侧栏：连接、记录或会话的许可范围已变化。','amber'); return false;
     }
-    const s=ctx.sessions.get(current.ref.sid); text(title,s?.title || '关联会话'); text(address,current.ref.sid+' · '+current.cwd); return true;
+    const s=ctx.sessions.get(current.ref.sid); text(title,(s?.cwd===current.cwd && s.title) || '关联会话'); text(address,current.ref.sid+' · '+current.cwd); return true;
   }
   function open(ref,trigger) {
-    if(!ctx.alive()) return;
+    if(!ctx.alive() || trigger?.isConnected===false) return;
     const cwd=target(ref);
     if(!cwd) {msg(notice,'目前不能在侧栏查看这个会话，请刷新连接并核对目标目录。','amber');ctx.paint();return;}
     const r=current?.ref;
-    if(r && r.sid===ref.sid && r.taskId===ref.taskId && r.itemId===ref.itemId && r.kind===ref.kind && current.cwd===cwd) {closeButton.focus();return;}
+    if(r && r.sid===ref.sid && current.cwd===cwd) {
+      // A session-level button and several demands may point to the exact
+      // same native chat. Revalidate the new ref, but keep its existing lease.
+      current.ref=ref;current.trigger=trigger;ctx.paint();closeButton.focus();return;
+    }
     close(); if(!ctx.alive() || target(ref)!==cwd) return;
     msg(notice); const host=el('div','rt-pane-mount'); host.setAttribute('data-session-id',ref.sid);
     const lease={ref,cwd,host,trigger,cleanup:null}; current=lease; body.append(host); node.hidden=false; ctx.paint();
@@ -72,7 +80,7 @@ function createSessionDock(ctx) {
     } catch(err) {failed(err);}
     if(current===lease) closeButton.focus();
   }
-  return {node,notice,target,open,update,close,selected:id=>current?.ref.taskId===id};
+  return {node,notice,target,open,update,close,selected:id=>current?.ref.taskId===id,selectedSession:sid=>!!sid && current?.ref.sid===sid};
 }
 
 // Preview and commit are separate user actions. The IDs, not a live predicate,
@@ -82,7 +90,7 @@ function createRecordCleanup(ctx) {
   const bulk=button('清理已完成',askBatch), box=el('div','rt-clean-confirm'); box.setAttribute('role','group'); box.setAttribute('aria-label','确认清理路由记录');
   const prompt=el('p','rt-instruction'), scope=el('details'), entries=el('ul'), controls=el('div','rt-actions'); scope.append(el('summary','','核对记录列表'),entries);
   const cancel=button('取消',()=>leave(undefined,true)); box.append(prompt,scope,controls);
-  const rules=el('details','rt-clean-rules'); rules.append(el('summary','','清理规则'),el('p','rt-muted','批量清理只移除当前列表中全部已完成的记录。未发送的待选择记录，以及投递结果确定且无需恢复的失败记录，可在详情中单独删除。运行、排队、回执未知、待交接或待恢复的记录会保留。清记录不删除原会话或消息。'));
+  const rules=el('details','rt-clean-rules'); rules.append(el('summary','','清理规则'),el('p','rt-muted','批量清理按当前状态筛选，覆盖所有匹配项目（包括收起的项目和会话），只移除已完成的需求。未发送的待选择记录，以及投递结果确定且无需恢复的失败记录，可在详情中单独删除。运行、排队、回执未知、待交接或待恢复的记录会保留。清记录不删除原会话或消息。'));
   let preview=null, confirm=null;
   const canAsk=()=>ctx.alive() && ctx.onBoard && ctx.readable && !ctx.busy(feedback);
   const eligible=t=>!!t && isCompletedTask(t) && canRemoveTask(t);
@@ -95,12 +103,12 @@ function createRecordCleanup(ctx) {
   function begin(tasks,many,slot,trigger) {
     leave(); msg(feedback); const ids=tasks.map(t=>t.id); preview={batch:many,ids,trigger};
     const name=recordCaption(tasks[0]), withDraft=tasks.some(t=>list(t.items).some(i=>{const d=ctx.memory.items.get(pairKey(t.id,i.id));return d && hasItemDraft(d);}));
-    text(prompt,(many?'清理当前列表中的 '+ids.length+' 条已完成记录？之后完成的记录不在本次范围内。':'从任务记录中删除「'+name+'」？')+'只移除本机路由记录，不会删除原会话或消息，也不会停止会话。此操作无法撤销。'+(withDraft?' 未发送的草稿将保留在页面中，仅供复制。':''));
+    text(prompt,(many?'清理所有匹配项目中的 '+ids.length+' 条已完成记录（含折叠的会话）？之后完成的不在本次范围内。':'从任务记录中删除「'+name+'」？')+'只移除本机路由记录，不会删除原会话或消息，也不会停止会话。此操作无法撤销。'+(withDraft?' 未发送的草稿将保留在页面中，仅供复制。':''));
     const reviewed=preview; confirm=button(many?'确认清理已完成记录':'确认删除这条记录',()=>{if(preview===reviewed) send();},'rt-btn rt-danger'); controls.replaceChildren(cancel,confirm); scope.hidden=!many; scope.open=false;
-    if(many) entries.replaceChildren(...tasks.map(t=>el('li','',recordCaption(t)+' · '+t.id)));
+    if(many) entries.replaceChildren(...tasks.map(t=>el('li','',(ctx.ledgerPath(t.id) || '需求')+'：'+recordCaption(t)+' · '+t.id)));
     confirm.disabled=cancel.disabled=false; slot.append(box); cancel.focus();
   }
-  function askOne(id,slot,trigger) {const t=ctx.byTask.get(id); if(canAsk() && t && canRemoveTask(t) && typeof ctx.api.removeTask==='function') begin([t],false,slot,trigger);}
+  function askOne(id,slot,trigger) {const t=ctx.byTask.get(id); if(canAsk() && slot?.isConnected!==false && trigger?.isConnected!==false && t && canRemoveTask(t) && typeof ctx.api.removeTask==='function') begin([t],false,slot,trigger);}
   function askBatch() {const rows=batch(); if(canAsk() && rows.length && typeof ctx.api.clearCompleted==='function') begin(rows,true,batchSlot,bulk);}
   function send() {
     if(!preview || !canAsk()) return;
@@ -117,7 +125,7 @@ function createRecordCleanup(ctx) {
   function update() {
     const busy=ctx.busy(feedback), available=batch().length;
     bulk.disabled=!canAsk() || !available || typeof ctx.api.clearCompleted!=='function';
-    bulk.title=available?'只清理当前列表中全部已完成的 '+available+' 条记录':'当前列表没有可清理的已完成记录';
+    bulk.title=available?'按当前筛选清理所有项目中的 '+available+' 条已完成需求，包括折叠的会话':'当前筛选没有可清理的已完成记录';
     cancel.disabled=busy || !ctx.readable; if(confirm) confirm.disabled=cancel.disabled;
     if(preview && !busy && (!ctx.onBoard || !ctx.readable || (!preview.batch && !canRemoveTask(ctx.byTask.get(preview.ids[0]))))) {
       leave(); msg(feedback,'确认已失效，未删除记录。请重新核对。','amber');
@@ -132,9 +140,10 @@ export function mountRouter(root,api) {
   const scope=api.draftScope && typeof api.draftScope==='object' ? api.draftScope : api;
   const memory=draftsByAPI.get(scope) || {compose:'',rev:0,settings:null,items:new Map()}; draftsByAPI.set(scope,memory);
   const pending=new Set(), taskViews=new Map();
+  let groupedState=null, groupedFilter=null, groupedOnline=null, groups=[], locations=new Map(), lastSubmitted='';
   let disposed=false, unsubscribe, version=0, readError='', subError='', chooseInitial=true, view='board';
-  const ctx={api,ui,memory,state:empty(),byTask:new Map(),loaded:false,online:false,readable:false,onBoard:true,ready:false,filter:'',models:[],sessions:new Map(),dirs:[],
-    alive:()=>!disposed,busy:n=>pending.has(n),run,paint,markSettingsDirty,goBoard:()=>navigate('board')};
+  const ctx={api,ui,memory,state:empty(),byTask:new Map(),loaded:false,online:false,readable:false,onBoard:true,ready:false,filter:'',models:[],sessions:new Map(),rosterIds:new Set(),dirs:[],
+    alive:()=>!disposed,busy:n=>pending.has(n),ledgerPath:id=>locations.get(id),run,paint,markSettingsDirty,goBoard:()=>navigate('board')};
   ctx.pane=createSessionDock(ctx); ctx.cleanup=createRecordCleanup(ctx);
   const shell=el('div','dshr-shell'); shell.setAttribute('lang','zh-CN');
   const sheet=el('style'); sheet.textContent=css;
@@ -149,7 +158,16 @@ export function mountRouter(root,api) {
   const board=el('div','dshr rt-board'), composeBox=el('form','rt-compose rt-card'); composeBox.noValidate=true;
   const compose=el('textarea'), composerFeedback=live(); compose.rows=2; compose.placeholder='例如：检查网站项目的发布说明，列出需要更新的内容。'; compose.value=memory.compose;
   const send=el('button','rt-btn rt-primary','提交任务'); send.type='submit';
-  const composeFoot=el('div','rt-compose-foot'); composeFoot.append(el('span','rt-muted','⌘ / Ctrl + Enter 提交'),composerFeedback,send);
+  const locate=button('定位本次需求',()=>{
+    if(disposed || !ctx.onBoard || !ctx.byTask.has(lastSubmitted)) return;
+    const task=ctx.byTask.get(lastSubmitted);
+    if(!matchesFilter(task,ctx.filter)) {
+      ctx.cleanup.leave();ctx.filter='';paint();msg(composerFeedback,'已切换到「全部状态」，定位本次需求。');
+    }
+    if(tree.reveal(lastSubmitted)) taskViews.get(lastSubmitted)?.focus();
+  },'rt-btn rt-quiet');locate.hidden=true;
+  const composeFoot=el('div','rt-compose-foot'), submitTools=el('div','rt-actions');submitTools.append(locate,send);
+  composeFoot.append(el('span','rt-muted','⌘ / Ctrl + Enter 提交'),composerFeedback,submitTools);
   const setupWarning=el('div','rt-setup-warning'), setupReason=el('span');
   setupWarning.append(setupReason,button('去路由设置',()=>navigate('settings'),'rt-btn rt-quiet'));
   const composeHead=el('div','rt-compose-head'), routeInfo=el('p','rt-muted'); composeHead.append(el('h2','','新建任务'),routeInfo);
@@ -158,10 +176,15 @@ export function mountRouter(root,api) {
   composeBox.addEventListener('submit',e=>{e.preventDefault();submit();}); shortcut(compose,submit);
   const ledger=el('section','rt-ledger'), ledgerHead=el('div','rt-ledger-head'), filter=el('select');
   const ledgerTitle=el('div'), stats=el('p','rt-muted'), ledgerTools=el('div','rt-tools');
-  ledgerTitle.append(el('h2','','任务记录'),stats); ledgerTools.append(field('按状态筛选',filter),ctx.cleanup.bulk); ledgerHead.append(ledgerTitle,ledgerTools);
+  ledgerTitle.append(el('h2','','任务记录'),el('p','rt-muted','按项目展开会话，再查看会话里的需求。'),stats); ledgerTools.append(field('按状态筛选',filter),ctx.cleanup.bulk); ledgerHead.append(ledgerTitle,ledgerTools);
   filter.addEventListener('change',()=>{ctx.cleanup.leave();ctx.filter=filter.value;paint();});
   const cards=el('div','rt-task-list'), blank=el('div','rt-empty rt-card'), blankTitle=el('h3'), blankBody=el('p','rt-muted');
   cards.setAttribute('role','region'); cards.setAttribute('aria-label','任务历史'); cards.tabIndex=0;
+  const tree=createLedgerTree(ctx,cards,task=>{
+    let view=taskViews.get(task.id);
+    if(!view) {view=createTask(ctx,task.id);taskViews.set(task.id,view);}
+    view.update(task);return view.node;
+  });
   blank.append(blankTitle,blankBody); ledger.append(ledgerHead,ctx.cleanup.batchSlot,ctx.cleanup.feedback,blank,cards,ctx.cleanup.rules);
   const orphan=el('section','rt-card rt-orphan'), orphanText=el('pre','rt-user-text');
   orphan.append(el('h3','','已离开列表的草稿'),el('p','rt-muted','这些记录已不在当前列表。未提交的草稿仍可复制，不会发送到其他会话。'),orphanText);
@@ -177,9 +200,10 @@ export function mountRouter(root,api) {
     if (!ctx.online || !ctx.ready || pending.has(composerFeedback)) return;
     const value=compose.value, rev=memory.rev;
     if (!value.trim()) {msg(composerFeedback,'请先填写任务内容。','red'); compose.focus(); return;}
-    run(composerFeedback,'提交任务',()=>api.submit(value),()=>{
+    run(composerFeedback,'提交任务',()=>api.submit(value),taskId=>{
+      lastSubmitted=typeof taskId==='string'?taskId:'';
       if (rev===memory.rev) {memory.compose=''; val(compose,'');}
-      return '任务已提交，可在下方查看状态和会话。';
+      return '任务已提交，可在下方按项目和会话查看。';
     });
   }
   async function run(slot,label,work,accepted,{offline=false}={}) {
@@ -219,15 +243,23 @@ export function mountRouter(root,api) {
     }
     const n=s=>counts.get(s)||0; text(stats,'共 '+tasks.length+' 条 · 待处理 '+attention+' · 进行中 '+active+' · 已完成 '+tasks.filter(isCompletedTask).length);
     options(filter,[...STATUS].map(([key,[label]])=>({value:key,label:label+'（'+n(key)+'）'})),ctx.filter,'全部状态（'+tasks.length+'）');
-    const present=new Set(), activeItems=new Set(), ordered=[...tasks].sort((a,b)=>(Date.parse(b.createdAt)||Number(b.createdAt)||0)-(Date.parse(a.createdAt)||Number(a.createdAt)||0));
-    const nodes=ordered.map(t=>{
-      present.add(t.id); list(t.items).forEach(it=>activeItems.add(pairKey(t.id,it.id)));
-      if (!taskViews.has(t.id)) taskViews.set(t.id,createTask(ctx,t.id)); const v=taskViews.get(t.id);v.update(t);return v.node;
-    });
-    order(cards,nodes); for (const id of taskViews.keys()) if (!present.has(id)) taskViews.delete(id);
-    blank.hidden=!!tasks.length && (!ctx.filter || n(ctx.filter)>0);
+    // Keys come from the journal's exact project/session bindings. Grouping
+    // never edits tasks or consults a remote service; a repaint can reuse it.
+    if(groupedState!==ctx.state || groupedFilter!==ctx.filter || groupedOnline!==ctx.online) {
+      // A failed read does not replace the last good journal snapshot. Keep
+      // its local history, but do not keep presenting roster titles as live.
+      groups=groupLedger(ctx.online?ctx.state:{...ctx.state,connected:false},ctx.filter);
+      groupedState=ctx.state;groupedFilter=ctx.filter;groupedOnline=ctx.online;
+      locations=new Map();
+      for(const p of groups) for(const s of p.sessions) for(const t of s.tasks) locations.set(t.id,p.label+' / '+s.label);
+    }
+    tree.update(groups);
+    for(const id of taskViews.keys()) if(!ctx.byTask.has(id)) taskViews.delete(id);
+    locate.hidden=!lastSubmitted || !ctx.byTask.has(lastSubmitted);
+    const activeItems=new Set();for(const t of tasks) for(const i of list(t.items)) activeItems.add(pairKey(t.id,i.id));
+    blank.hidden=groups.length>0;
     cards.hidden=!blank.hidden; text(blankTitle,!ctx.loaded?'正在读取记录':tasks.length?'没有匹配的记录':'还没有任务');
-    text(blankBody,!ctx.loaded?'连接后将在这里显示最新进度。':tasks.length?'换一个状态，或选择「全部状态」。':'提交任务后，在这里查看去向、进度和结果。');
+    text(blankBody,!ctx.loaded?'连接后将在这里显示最新进度。':tasks.length?'换一个状态，或选择「全部状态」。':'提交后，这里会按项目和会话整理需求；未确定去向的需求也会保留。');
     const lost=[];
     for (const [k,d] of memory.items) if (!activeItems.has(k)) {
       if (!hasItemDraft(d)) {memory.items.delete(k); continue;}
@@ -243,7 +275,15 @@ export function mountRouter(root,api) {
       if (!s || typeof s!=='object' || !('connected' in s)) {fail(new Error('宿主没有提供有效的状态快照'));return;}
       readError=''; ctx.loaded=true; ctx.state={settings:s.settings || {},tasks:list(s.tasks),workspaces:list(s.workspaces),catalog:list(s.catalog),sessions:list(s.sessions),connected:s.connected===true,notice:str(s.notice)};
       ctx.byTask=new Map(ctx.state.tasks.map(t=>[t.id,t])); ctx.models=catalogEntries(s.catalog); ctx.dirs=directoryOptions(s.settings?.projects,s.settings?.generalDir);
-      ctx.sessions=new Map(list(s.sessions).map(x=>[x.id,x])); ctx.setupIssue=checkSettings(ctx.state.settings,ctx.models,ctx.state.catalog).error; ctx.ready=!ctx.setupIssue;
+      // A historical ID alone never authorizes a live row. Drop ambiguous
+      // identities as well, rather than showing the last row with that ID.
+      const allowed=new Set(ctx.dirs.map(d=>d.value)), seen=new Set();ctx.sessions=new Map();ctx.rosterIds=seen;
+      for(const row of ctx.state.sessions) {
+        if(!row || typeof row.id!=='string' || !row.id) continue;
+        if(seen.has(row.id)) {ctx.sessions.delete(row.id);continue;}
+        seen.add(row.id);if(allowed.has(row.cwd)) ctx.sessions.set(row.id,row);
+      }
+      ctx.setupIssue=checkSettings(ctx.state.settings,ctx.models,ctx.state.catalog).error; ctx.ready=!ctx.setupIssue;
       if (chooseInitial && ctx.state.connected) {view=!ctx.ready && !ctx.state.tasks.length && !memory.compose ? 'settings' : 'board'; chooseInitial=false;}
       paint();
     }
@@ -261,6 +301,6 @@ export function mountRouter(root,api) {
   return function dispose() {
     if (disposed) return; disposed=true;version++;ctx.cleanup.leave();ctx.pane.close();
     doc.defaultView?.removeEventListener('beforeunload',guardReload);
-    try { if (typeof unsubscribe==='function') unsubscribe(); } finally {shell.remove();taskViews.clear();}
+    try { if (typeof unsubscribe==='function') unsubscribe(); } finally {tree.dispose();shell.remove();taskViews.clear();locations.clear();}
   };
 }

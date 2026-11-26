@@ -22,6 +22,7 @@ export function panelDOM(settings, restored) {
     get textContent() { return this.data + this.children.map(n => n.textContent).join('') }
     setAttribute(k,v) { this.attrs[k] = String(v); changed() }
     getAttribute(k) { return this.attrs[k] ?? null }
+    get isConnected() { return this===root || !!this.parent?.isConnected }
     get parentElement() { return this.parent || null }
     get parentNode() { return this.parentElement }
     contains(n) { return n === this || this.children.some(c => c.contains(n)) }
@@ -43,7 +44,7 @@ export function panelDOM(settings, restored) {
       watchers.add(test); test()
     })
   }
-  const ready = () => until(() => root.find(n => n.tag === 'button' && n.type === 'submit' && n.textContent === '提交任务' && !n.disabled), 'production form unavailable')
+  const ready = () => until(() => root.find(n => n.tag === 'button' && n.type === 'submit' && n.textContent === '提交任务' && visible(n) && !n.disabled), 'production form unavailable')
   async function submit(text) {
     await ready()
     const form = root.find(n => n.tag === 'form' && n.className.includes('rt-compose'))
@@ -56,7 +57,16 @@ export function panelDOM(settings, restored) {
     return text === undefined ? tasks[0] : tasks.find(t => t.text === text)
   }
   const item = text => task(text)?.items?.[0]
-  const visible = n => { for (; n; n=n.parentElement) if (n.hidden) return false; return true }
+  // Only interact with attached controls a user could reach. A former task
+  // scope can survive in a test variable after rendering/collapsing the tree.
+  function visible(n) {
+    for (; n; n=n.parentElement) {
+      if (n.hidden) return false
+      if (n===root) return true
+      if (n.parentElement?.tag==='details' && n.tag!=='summary' && !n.parentElement.open) return false
+    }
+    return false
+  }
   async function click(predicate,scope=root,label='visible control') {
     const node = await until(() => scope.find(n => n.tag==='button' && visible(n) && !n.disabled && predicate(n)), label)
     node.dispatchEvent(new Event('click',{cancelable:true,bubbles:true}))
