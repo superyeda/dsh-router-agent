@@ -180,9 +180,29 @@ async function addRecent(st,cat,getRecent) {
   st.ranked.sort(byEvidence);
 }
 
+// A greeting alone has no project subject. Keep this narrow: ordinary neutral
+// prose can describe work which ONLY a model can associate with a project label.
+const greeting = t=>/^(?:你好|您好|谢谢|hi|hey|hello|thanks)[\s，。！？,.!?]*$/iu.test(t.trim());
+function tierAdviceMatters(st,tiers) {
+  if(st.tier.fixed) return false;
+  // Don't buy a round of classification merely to demote a short, standalone
+  // general question from standard to fast. Same-work and project evidence
+  // are checked separately and still take priority over this latency policy.
+  const simpleQuestion=(st.generalIntent || isGeneral(st.control,{auto:true})) &&
+    (st.generalQuestion || /[?？]|解释|科普|讲讲|什么是|是什么|如何|怎么|\b(?:what|why|how|explain)\b/iu.test(st.control));
+  if(greeting(st.control) || (simpleQuestion && !st.hints.length && st.task.text.length<=120 && !/[;；\n]/u.test(st.control))) return false;
+  const base=chooseTier(st.tier), a=tiers?.[base];
+  // The controller supplies resolved selections. With no valid table, retain
+  // the symbolic tier choice rather than treating two missing slots as equal.
+  return Object.keys(tierLabel).some(t=>{
+    const next=chooseTier(st.tier,t), b=tiers?.[next];
+    return base!==next && !(a?.provider && a.model && a.provider===b?.provider && a.model===b.model && (a.effort??'')===(b.effort??''));
+  });
+}
+
 // Return a cwd, not an instruction to reuse any conversation in it. A model
 // can only return an index into its bounded local proposal table (inference).
-function autoDirectory(st,cat,model,strong) {
+function autoDirectory(st,cat,model,strong,probe) {
   if(st.path) return {path:st.path,why:st.whyPath,general:st.general};
   const owners=new Set(strong.map(r=>r.s.cwd));
   if(owners.size===1) return {path:[...owners][0],why:'候选会话虽不唯一，其同事项证据都属于同一个工作目录'};
@@ -199,19 +219,32 @@ function autoDirectory(st,cat,model,strong) {
   if(!destructive && model?.projectHint && (!plausible.size || plausible.has(model.projectHint.path))) {
     return {path:model.projectHint.path,why:'可核验的请求线索与该已授权项目的短标签或证据语义吻合，模型引用已经核验'};
   }
+  // A fallback is not itself evidence. In the local probe, let any other
+  // plausibly offerable project through to the bounded, quote-checked advisor.
+  // One work project can still displace a *different* general fallback.
+  function fallback(path,why,general=false) {
+    if(probe && !destructive && !greeting(st.control)) {
+      const options=st.generalIntent ? st.hints.filter(h=>!st.generalQuestion && h.named).map(h=>h.path)
+        : st.scope.deictic ? st.hints.map(h=>h.path) : [...cat.roots.keys()];
+      if(options.some(p=>p!==path)) return null;
+    }
+    return {path,why,general};
+  }
   if(st.scope.deictic) {
-    if(st.latest && cat.roots.has(st.latest.cwd)) return {path:st.latest.cwd,why:'“这个项目”指向本路由台最近实际接纳工作的项目'};
-    if(cat.defaultProject) return {path:cat.defaultProject,why:'“这个项目”采用你选定的默认项目'};
+    if(st.latest && cat.roots.has(st.latest.cwd)) return fallback(st.latest.cwd,'“这个项目”指向本路由台最近实际接纳工作的项目');
+    if(cat.defaultProject) return fallback(cat.defaultProject,'“这个项目”采用你选定的默认项目');
     return {error:'尚无能指明“这个项目”的本地上下文、默认项目或独立线索，请确认目录'};
   }
   const projectFirst=!st.generalIntent && (projectWork(st.control.replace(/设计|制作|规划|申请/gu,''),{auto:true}) || destructive || plausible.size>0);
-  if(!projectFirst && cat.general) return {path:cat.general,general:true,why:'没有专属项目证据，通用问答、写作或中性请求使用已配置的通用目录'};
-  if(cat.defaultProject) return {path:cat.defaultProject,why:'没有唯一项目线索，使用你选定的默认项目'};
-  if(cat.roots.size) return {path:cat.roots.keys().next().value,why:cat.roots.size===1?'只有一个已授权工作项目':'未设默认项目，按配置顺序使用第一个已授权项目'};
-  if(cat.general) return {path:cat.general,general:true,why:'只有一个已授权的通用工作目录'};
+  if(!projectFirst && cat.general) return fallback(cat.general,'没有专属项目证据，通用问答、写作或中性请求使用已配置的通用目录',true);
+  if(cat.defaultProject) return fallback(cat.defaultProject,'没有唯一项目线索，使用你选定的默认项目');
+  if(cat.roots.size) return fallback(cat.roots.keys().next().value,cat.roots.size===1?'只有一个已授权工作项目':'未设默认项目，按配置顺序使用第一个已授权项目');
+  if(cat.general) return fallback(cat.general,'只有一个已授权的通用工作目录',true);
   return {error:'还没有可用的已授权目录，请先在设置中选择工作目录'};
 }
-function result(st,cat,model,note) {
+// In a local automatic probe, yield null at a decision an advisory reply
+// could change. Do not use a speculative cwd to narrow the later model input.
+function result(st,cat,model,note,probe) {
   const {task}=st, tier=chooseTier(st.tier,model?.tier);
   const whyTier=tier===st.tier.tier ? st.tier.reason : '有限复杂度证据与模型建议共同支持'+tierLabel[tier]+'档';
   const base={...task,project:st.general?null:publicProject(st.path,cat),tier};
@@ -241,17 +274,21 @@ function result(st,cat,model,note) {
   if(st.auto) {
     if(!st.forceNew && !strong.length) {
       const supported=st.ranked.filter(r=>r.supported && !r.conflict);
-      if(model?.relation==='same' && supported.includes(model.row) && model.quotesSupport && (supported.length===1 || current===model.row)) {
-        return reuse(model.row,'模型引用经核验，并有独立的具体对象证据支持同一事项');
+      const candidate=supported.length===1 ? supported[0] : supported.includes(current) ? current : null;
+      if(candidate && model?.relation==='same' && model.row===candidate && model.quotesSupport) {
+        return reuse(candidate,'模型引用经核验，并有独立的具体对象证据支持同一事项');
       }
       if(st.cont && current?.supported) return reuse(current,'明确的跟进指令、独立具体对象和最近本地接纳记录指向同一事项');
+      if(probe && candidate && (candidate.titleRelevant || candidate.recent.length)) return null;
       if(st.cont) {
         const eligible=st.ranked.filter(r=>!r.conflict), weak=eligible.filter(r=>r.score>0);
         return clarify('你明确要求跟进已有工作，但缺少足以区分原事项的证据；请确认原会话或明确新建',weak.length?weak:eligible);
       }
     }
-    const dir=autoDirectory(st,cat,model,strong);
+    const dir=autoDirectory(st,cat,model,strong,probe);
+    if(!dir) return null;
     if(dir.error) return clarify(dir.error);
+    if(probe && tierAdviceMatters(st,probe.tiers)) return null;
     st.path=dir.path;st.general=!!dir.general;st.whyPath=dir.why;base.project=st.general?null:publicProject(dir.path,cat);
   }
   if(!st.path && st.hints.length===1) {
@@ -298,6 +335,10 @@ export async function planRequest({text,settings,sessions,getRecent,infer}={}) {
   prepare(st,cat);
   if (st.locked || st.manual || st.pure) return [result(st,cat,null,'规则')];
   await addRecent(st,cat,getRecent);
+  if(st.auto && typeof infer==='function') {
+    const local=result({...st},cat,null,'规则',{tiers:settings?.tiers});
+    if(local && local.decision!=='clarify') return [local];
+  }
   const {advice,note}=await advise(st,infer,cat);
   return [result(st,cat,advice,note)];
 }

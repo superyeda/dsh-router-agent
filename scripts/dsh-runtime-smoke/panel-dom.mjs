@@ -35,11 +35,11 @@ export function panelDOM(settings, restored) {
   }
   const doc = {defaultView: win, createElement: tag => new Element(tag)}
   const root = doc.createElement('main')
-  function until(check, label) {
+  function until(check, label, timeoutMs = 6000) {
     return new Promise((resolve, reject) => {
       const finish = (fn, value) => { clearTimeout(timer); watchers.delete(test); fn(value) }
       const test = () => { try { const value = check(); if (value) finish(resolve, value) } catch (e) { finish(reject, e) } }
-      const timer = setTimeout(() => finish(reject, Error(label + ': ' + (root.find(n => n.attrs.role === 'alert' && !n.hidden)?.textContent || 'not ready'))), 6000)
+      const timer = setTimeout(() => finish(reject, Error(label + ': ' + (root.find(n => n.attrs.role === 'alert' && !n.hidden)?.textContent || 'not ready'))), timeoutMs)
       watchers.add(test); test()
     })
   }
@@ -61,5 +61,6 @@ export function panelDOM(settings, restored) {
     const node = await until(() => scope.find(n => n.tag==='button' && visible(n) && !n.disabled && predicate(n)), label)
     node.dispatchEvent(new Event('click',{cancelable:true,bubbles:true}))
   }
-  return {win, root, until, changed, item, task, ready, submit, visible, click, snapshot: () => store.get(journalKey)}
+  const onChange = fn => {watchers.add(fn); return () => watchers.delete(fn)}
+  return {win, root, until, changed, onChange, item, task, ready, submit, visible, click, snapshot: () => store.get(journalKey)}
 }

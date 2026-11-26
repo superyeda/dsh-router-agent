@@ -11,7 +11,8 @@ sh scripts/dsh-runtime-smoke/run.sh \
   --compare-0.1.0 dsh-router-agent-0.1.0.tgz \
   --compare-0.1.1 dsh-router-agent-0.1.1.tgz \
   --compare-0.1.2 dsh-router-agent-0.1.2.tgz \
-  --compare-0.2.0 dsh-router-agent-0.2.0.tgz
+  --compare-0.2.0 dsh-router-agent-0.2.0.tgz \
+  --compare-0.2.1 dsh-router-agent-0.2.1.tgz
 ```
 
 [启动器](./run.sh) 默认使用系统 Applications 下的 DeepSeek Harness.app；可把其他位置的同版本应用路径作为最后一个参数（不能在当前用户主目录中）。无需安装依赖、启停现用 DSH，也不需要打开浏览器。每次都创建独立临时目录，结束即清理。版本不匹配、缺少 sandbox-exec 或任一断言失败都会非零退出。
@@ -34,9 +35,9 @@ sh scripts/dsh-runtime-smoke/run.sh \
 - 用两个确切的旧版遗留会话分别模拟**同进程插件热重载**与**完整冷启动**（两个顺序退出/启动的 Electron PID 仅共享临时 DSH_HOME）。相同键和目录不能自动创建或取得配置权；错误目录/键不修改原日志。所有者显式恢复才会复用该 ID，冷 Agent 的唯一新增初始化记录是原生 `session/end-seed {}`，回执 cursor=4。重确认同一未改动会话得到相同水位，不再加 marker；配置始终 `not-owned`。真实适配器只准一次投递，拒绝第二次，重开 JSONL 核对一条相符用户消息、一轮完整结果、零选模记录。会话总数及全局默认均不变。
 - 另测试带合法前缀/UUID 的原生 live 空会话：非 owner 即使有该 Session 的端点权限也不能恢复，显式复用不等于取得所有权。所有者确认后，如果别的原生请求先写入，陈旧许可会在发出 router prompt 前被拦截。忙碌且有排队输入或已有历史时也不准恢复。
 
-**生产面板的首次挂载与完全卸载后的重挂载**也单独复验。[面板回归](./panel.mjs) 先撤回诊断用的 root Remote 描述符，再用真实 `client.plugin()` 挂载[生产客户端](../../lib/client.js)，从注册的 main slot 取得页面使用的 `connectRouter`，通过表单提交。记录的真实 RPC 顺序必须为 `routerAgent/infer → routerAgent/create → routerAgent/configure → session/prompt`，并验证分类输出确实被 planner 采用、任务得到预期结果，卸载后两个 slots 与 `remote.routerAgent` 服务均消失。旧包对照必须得到 `cannot get property "remote.routerAgent" without inject` 的失败分项，且没有任何 router 或 prompt RPC；这才会输出 REPRO。
+**生产面板的首次挂载与完全卸载后的重挂载**也单独复验。[面板回归](./panel.mjs) 先撤回诊断用的 root Remote 描述符，再用真实 `client.plugin()` 挂载[生产客户端](../../lib/client.js)，从注册的 main slot 取得页面使用的 `connectRouter`，通过表单提交「流星雨」语义选址请求，只有模型的双向原文证据能将请求送到非默认的「天象观测」目录。记录的真实 RPC 顺序必须为 `routerAgent/infer → routerAgent/create → routerAgent/configure → session/prompt`，并验证分类输出确实被 planner 采用、任务得到预期结果，卸载后两个 slots 与 `remote.routerAgent` 服务均消失。旧包对照必须得到 `cannot get property "remote.routerAgent" without inject` 的失败分项，且没有任何 router 或 prompt RPC；这才会输出 REPRO。
 
-**自动路由回归**使用[生产表单场景](./routing.mjs)和单独的 Electron 宿主（注册安装包 standard/PTC 预设的安全条目，部署基值 standard，显式宿主偏好 ptc）。唯一内存 provider 的实际模型 ID 为 `synthetic-fast`、`synthetic-standard`、`synthetic-deep`。浏览器内设置只有一个项目和一个不同的通用目录，原三档均指向 deep；无对话侧推理会操作文件。分类器有意建议最高档，以便本地策略不能靠模型讨巧。
+**自动路由回归**使用[生产表单场景](./routing.mjs)和单独的 Electron 宿主（注册安装包 standard/PTC 预设的安全条目，部署基值 standard，显式宿主偏好 ptc）。唯一内存 provider 的实际模型 ID 为 `synthetic-fast`、`synthetic-standard`、`synthetic-deep`。浏览器内设置只有一个项目和一个不同的通用目录，原三档均指向 deep；无对话侧推理会操作文件。分类器若被询问会建议最高档；当前版本的单项目改错字、明确同事项续接、复杂架构三项在本地已确定目标与有效档位，必须不调用分类器。
 
 - 0.1.2 负对照：未点项目的安装标题错字需要澄清；再指定项目并明确新建，同类错字实际用 deep 且继承 ptc；无“继续”、未点项目的同件事复述却被另开在通用目录。不是仅检查路由返回值。
 - 当前成品：提交错字要求，初次由 fast Agent 接受后，模型端暂停。同一项目和任务没有标题投影；关闭并重新打开生产面板，保留已接纳的 journal，再从主表单提交同文件、同平台、同字替换的另一种说法。在首轮仍在途时必须复用同一 ID、不能再次 create/configure；随后新提交的无关复杂架构要求必须创建不同的 deep Agent。读取真实 Session JSONL 并比对 `source.rpcId`、`model/selection` 和实际适配器执行记录。
@@ -47,7 +48,7 @@ sh scripts/dsh-runtime-smoke/run.sh \
 
 	sh scripts/dsh-runtime-smoke/run.sh --ledger-only
 
-- 向生产表单提交带“先 / 然后 / 最后”的三行要求；不是把三个子任务送给夹具。必须恰好一条记录、一个子项、一个真实执行会话、一次 `session/prompt` RPC。模型收到的文本和落盘的用户消息须逐字匹配（含换行与标点），不得再发第二条 prompt。
+- 向生产表单提交带“先 / 然后 / 最后”的三行要求；不是把三个子任务送给夹具。已点名项目且档位已固定，不调用 `infer`；必须恰好一条记录、一个子项、一个真实执行会话，严格一次 `create → configure → session/prompt`。模型收到的文本和落盘的用户消息须逐字匹配（含换行与标点），不得再发第二条 prompt。
 - 第一轮真实模型暂停时，从默认折叠的记录直接点原会话按钮。宿主启用官方事件源；[原装客户端服务](./stock-session.mjs)负责目录、实时授权、会话引用和事件窗口。验证同页作用域、唯一 `session/follow` 流（原 ID、仅对已在执行的 Agent 打开原生订阅，要求 assistant 流），以及提供给 React portal 的确切原生引用：原文、运行中状态和引用来源 `routerPane` 都须一致。关闭后引用归零；打开和关闭均不导航，不增添 JSONL 事件。
 - 在途记录不可清理；完成后第一次点击只显示确认，显式确认才移除本机记录。原会话及完整落盘日志保持不变。不安装、不中断现用 DSH；本例在 React portal 接收原生引用处停止，不涵盖浏览器像素渲染、原生输入框交互或审批操作。
 
@@ -58,5 +59,16 @@ sh scripts/dsh-runtime-smoke/run.sh \
 - 0.2.0 成品在四句非命令式自然话语/指代上均待选择，没有真实投递。
 - 0.2.1 的集成成品由业务词找到正确目录，无需用户选择；真实创建一个更新时间更晚的普通原生会话，再重进面板，“刚才那个”仍续本地已接纳的原 ID，而不是原生列表里最新的会话。同领域换了具体事项必须新建；另一领域用另一个目标，“继续”才顺着新近接纳的会话。随后独立的午休点心要求在通用目录新建；明确指向未授权绝对路径则保留待选择。
 - 每次只通过生产表单提交，不点击澄清、复用或新建按钮。按调用追踪及真实 JSONL 的人类请求标识、原文与执行次数逐条核对；单独播种的原生干扰输入不会计入路由台投递。
+
+**慢意图分类对照（0.2.1）**由[专项场景](./slow-infer.mjs)驱动。可单跑旧包（无需构建新客户端），或比较旧包和当前成品：
+
+	sh scripts/dsh-runtime-smoke/run.sh --repro-0.2.1 dsh-router-agent-0.2.1.tgz
+	sh scripts/dsh-runtime-smoke/run.sh --slow-infer-only --compare-0.2.1 dsh-router-agent-0.2.1.tgz
+
+只验当前成品可省去 `--compare-0.2.1 …`。两个版本分别运行在新的 Electron PID、空白临时 HOME / DSH_HOME 和 cwd。旧版客户端、宿主及契约均取自相同原包。表单双方只提交一次同一句话，不手选、不重投：
+
+- 在两个已授权的无语义目录 u17、u42 中，列表首项和预设默认均是错误目标 u17（古籍装帧）。请求「按今晚的流星雨概率，实现逐小时亮度曲线。」与两个项目显示名均没有相同汉字。本地词证据和候选会话必须为空。唯一纯内存分类器从真实载荷找到「天象观测」的 pN，只返回请求原话「流星雨概率」、该项目的完整标签及所需 JSON 字段；不收路径，不用工具。
+- 在模型适配器内真实等待 7300 ms。旧包的 6500 ms planner 截止先取消在途的 Remote 和合成模型，生产面板必须出现「意图模型不可用……Remote invocation "routerAgent/infer" was aborted」，且只按本地默认向 u17 投一次。内存 Fetch 载体保留浏览器在 Request.signal 中止时拒绝客户端 Promise 的语义；异常文案由真实 Typert 生成，并非夹具填入。
+- 当前成品必须收到这条稍慢的合法回复，在原面板上自然完成，且按语义送到 u42。客户端与模型均不能中止，也不能出现模型不可用假提示。两臂分别要求 1 次 infer、1 次 create、1 次 configure、1 次 prompt、一个会话；从持久化 JSONL 校验完整原文、同一人类 rpcId、完成轮及实际模型。旧包在延迟期间可能提前排队读取半轮，故仅对旧包在原生 turn/end 后重挂面板以重新读取最终记录；不重试或再次投递。
 
 **隔离与边界：** 启动器清空继承环境，将 HOME、DSH_HOME、TMPDIR、cwd 指向临时区。子进程以 macOS Seatbelt 拒绝所有网络、读取原用户主目录及临时区之外的文件写入；仅显式挂载的库服务参与，未加载用户 profile、凭据、设置编辑器或真实模型适配器。模型响应与 Peer 均由测试创建。面板场景的 DOM、存储、槽位外壳及菜单权限提示由内存夹具承载；授权基线仍是实际远端流，表单、journal、controller、planner、客户端/宿主网关和 Agent 均走生产路径。未测试浏览器/React 渲染、登录、生产模型质量、WebSocket、打包安装或真实 profile 配置写回。

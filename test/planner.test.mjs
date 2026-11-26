@@ -109,16 +109,25 @@ test('只为已选项目内、标题不够的少数候选读取最近两条；�
   const y=await one('继续修复商城项目的导出数字错位',{sessions:many,getRecent:async()=>{calls++;return [];}});assert.equal(y.decision,'clarify');assert.equal(calls,0);assert.ok(y.candidates.length<=LIMITS.candidates);
 });
 
+// Partial object + symptom: unlike an exact local match, corroborating quotes
+// can genuinely change the decision. Use this fixture to exercise the wire.
+const partialTitle='RasterGauge 的舍入偏差，周期末偶尔多一分';
+const partialWork='核对 RasterGauge 精度，定位跨币换算最后一位';
+const sameGauge=i=>({relation:'same',candidate:i.candidates[0].ref,requestQuote:'RasterGauge 精度',candidateQuote:'RasterGauge 的舍入偏差'});
+
 test('真实模型契约：整段仅一次、匿名候选、逐字证据、同项本地复核、明确档位不被覆盖',async()=>{
-  const sessions=[row('unshared-id-S','/work/shop','修复登录 401'),row('unused-id','/work/atlas','NEVER SEND THIS PRIVATE TITLE'),row('hidden-id','/else','NEVER SEND THIS PRIVATE TITLE')];let calls=0,recent=0,wire;
-  const x=await one('继续修复商城项目的登录 401；请用低档。',{sessions,getRecent:async()=>{recent++;return [];},infer:async m=>{
-    calls++;wire=m;
-    return answer(m,i=>({relation:'same',candidate:i.candidates[0].ref,candidateQuote:'登录 401',tier:'deep'}));
+  const sessions=[row('unshared-id-S','/work/shop',partialTitle),row('unused-id','/work/atlas','NEVER SEND THIS PRIVATE TITLE'),row('hidden-id','/else','NEVER SEND THIS PRIVATE TITLE')];let calls=0,wire;
+  const text='在商城项目'+partialWork+'；请用低档。';
+  assert.equal((await one(text,{sessions})).decision,'create','本地弱证据不能独自复用');
+  const recent=[];const x=await one(text,{sessions,getRecent:async id=>{recent.push(id);return [];},infer:async m=>{
+    calls++;wire=m;return answer(m,i=>({...sameGauge(i),tier:'deep'}));
   }});
-  assert.equal(calls,1);assert.equal(recent,0);assert.ok(wire.signal instanceof AbortSignal);assert.ok(wire.system.length>10);
+  assert.equal(calls,1);assert.deepEqual(recent,['unshared-id-S']);assert.ok(wire.signal instanceof AbortSignal);assert.ok(wire.system.length>10);
   assert.doesNotMatch(wire.user,/\/work\/|unshared-id-S|PRIVATE TITLE|unused-fast/u);assert.equal(JSON.parse(wire.user).items.length,1);
   assert.equal(x.sessionId,'unshared-id-S');assert.match(x.reason,/模型建议经本地校验/u);assert.equal(x.tier,'fast');
-  const fresh=await one('在商城项目添加购物车展示',{infer:async m=>answer(m,()=>({tier:'deep'}))});assert.equal(fresh.decision,'create');assert.equal(fresh.tier,'standard','模型不能把常规实现一律抬到 deep');
+  const sky={...settings,projects:[settings.projects[0],{name:'天象观测',path:'/work/atlas'}]};
+  const fresh=await one('实现按星体升落时刻绘制示意图',{settings:sky,infer:async m=>answer(m,i=>({tier:'deep',project:i.projects.find(p=>p.labels.includes('天象观测')).ref,projectQuote:'天象观测',requestQuote:'星体升落时刻'}))});
+  assert.equal(fresh.project,'/work/atlas');assert.equal(fresh.decision,'create');assert.equal(fresh.tier,'standard','模型不能把常规实现一律抬到 deep');
 });
 
 test('模型语义候选只作建议：不存在同事项独立证据不能复用，模型也不能解除硬澄清',async()=>{
@@ -129,21 +138,22 @@ test('模型语义候选只作建议：不存在同事项独立证据不能复�
 });
 
 test('分类回复严格校验：拒绝围栏、额外字段、未知 id/key/tier、伪造摘录、遗漏/重复和超限；整体回退',async()=>{
-  const sessions=[row('real','/work/shop','修复登录 401')];
+  const sessions=[row('real','/work/shop',partialTitle)], text='在商城项目'+partialWork;
   const patch=p=>s=>{const data=JSON.parse(s);Object.assign(data.items[0],p);return JSON.stringify(data);};
-  const cases=[()=>'{', s=>'~~~json\n'+s+'\n~~~',()=> 'x'.repeat(LIMITS.replyBytes+1),patch({tier:'vendor-model'}),patch({relation:'dispatch'}),patch({key:'t0'}),patch({requestQuote:'伪造证据'}),patch({relation:'same',candidate:'real',candidateQuote:'登录 401'}),()=>' {"items":[]}',s=>{const d=JSON.parse(s);d.items.push({...d.items[0]});return JSON.stringify(d);},patch({project:'/etc'}),patch({dependsOn:[]}),patch({relation:'same',candidate:'c1',candidateQuote:'没有这个摘录'})];
-  for(const corrupt of cases){let produced=false;const x=await one('继续修复商城的登录 401',{sessions,infer:async m=>{const raw=corrupt(answer(m));produced=true;return raw;}});assert.ok(produced);assert.equal(x.sessionId,'real');assert.match(x.reason,/未通过校验/u);}
+  const cases=[()=>'{', s=>'~~~json\n'+s+'\n~~~',()=> 'x'.repeat(LIMITS.replyBytes+1),patch({tier:'vendor-model'}),patch({relation:'dispatch'}),patch({key:'t0'}),patch({requestQuote:'伪造证据'}),patch({relation:'same',candidate:'real',candidateQuote:'RasterGauge 的舍入偏差'}),()=>' {"items":[]}',s=>{const d=JSON.parse(s);d.items.push({...d.items[0]});return JSON.stringify(d);},patch({project:'/etc'}),patch({dependsOn:[]}),patch({relation:'same',candidate:'c1',candidateQuote:'没有这个摘录'})];
+  assert.equal((await one(text,{sessions,infer:m=>answer(m,sameGauge)})).sessionId,'real');
+  for(const corrupt of cases){let calls=0;const x=await one(text,{sessions,infer:m=>{calls++;return corrupt(answer(m,sameGauge));}});assert.equal(calls,1);assert.equal(x.decision,'create');assert.equal(x.sessionId,undefined);assert.match(x.reason,/未通过校验/u);}
   const fail=await one('在商城项目跟进雷达的误报排查',{sessions,infer:async()=>{throw Error('untrusted secret');}});assert.equal(fail.decision,'clarify');assert.doesNotMatch(fail.reason,/untrusted secret/u);
 });
 
 test('请求和上下文预算：仅尾部有界摘录，长列表不静默丢项/截断，离线不需要模型',async()=>{
-  const messages=['NEVER TRANSMIT OLD','NEVER TRANSMIT PREFIX'+ 'x'.repeat(800),'这次要修复商城导出数字错位'];let sent;
-  const x=await one('继续修复商城的导出数字错位',{sessions:[row('can','/work/shop','杂项')],getRecent:async()=>messages,infer:async m=>{sent=m;const c=JSON.parse(m.user).items[0].candidates[0];return answer(m,()=>({relation:'same',candidate:c.ref,candidateQuote:c.recent.at(-1)}));}});
+  const messages=['NEVER TRANSMIT OLD '+partialTitle,'NEVER TRANSMIT PREFIX'+' '.repeat(800)+partialTitle,partialTitle];let sent;
+  const x=await one('在商城项目继续'+partialWork,{sessions:[row('can','/work/shop','杂项')],getRecent:async()=>messages,infer:async m=>{sent=m;const c=JSON.parse(m.user).items[0].candidates[0];return answer(m,()=>({relation:'same',candidate:c.ref,requestQuote:'RasterGauge 精度',candidateQuote:c.recent.at(-1)}));}});
   assert.equal(x.decision,'reuse');assert.doesNotMatch(sent.user,/NEVER TRANSMIT/u);assert.ok(Buffer.byteLength(sent.user+sent.system)<=LIMITS.requestBytes);
-  const snippets=JSON.parse(sent.user).items[0].candidates[0].recent;assert.ok(snippets.length<=2 && snippets.every(s=>s.length<=LIMITS.snippetChars));
+  const snippets=JSON.parse(sent.user).items[0].candidates[0].recent;assert.deepEqual(snippets,messages.slice(-2).map(s=>s.slice(-LIMITS.snippetChars)));
   const raw='写文章'+'长'.repeat(LIMITS.textChars);let calls=0;const y=await one(raw,{infer:async()=>{calls++;return '';}});assert.equal(y.decision,'clarify');assert.equal(calls,0);
   const list=Array.from({length:16},(_,i)=>(i+1)+'. 写文章').join('\n');assert.equal((await one(list)).decision,'create');
-  let budgetCalls=0;const full=await one('写一篇文章'+ '长'.repeat(4000),{infer:async()=>{budgetCalls++;return ''}});assert.equal(budgetCalls,0);assert.match(full.reason,/超出预算/u);
+  let budgetCalls=0;const full=await one('实现按流星雨概率生成图表'+ '长'.repeat(4000),{infer:async()=>{budgetCalls++;return ''}});assert.equal(budgetCalls,0);assert.match(full.reason,/超出预算/u);
 });
 
 const install1='把 docs/install.md 的 Linux 安装标题中「安裝」改成「安装」。';

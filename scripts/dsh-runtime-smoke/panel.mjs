@@ -5,6 +5,8 @@ import { panelDOM } from './panel-dom.mjs'
 import { checkRouting } from './routing.mjs'
 import { checkLedger } from './ledger.mjs'
 import { checkAutomatic } from './automatic.mjs'
+import { checkSlowInfer, semanticRequest, semanticSettings } from './slow-infer.mjs'
+import { join } from 'node:path'
 
 // Run the exact distributed factory in the SAME JS realm as Cordis. Its React
 // component merely passes the DOM root to connectRouter; drive that registered
@@ -76,10 +78,11 @@ export async function checkProductionPanel({client, Service, host, endpoints, ca
   }
   async function submit(plugin, legacy, round) {
     const tiers = Object.fromEntries(['fast', 'standard', 'deep'].map(k => [k, {provider, model: k === 'fast' ? defaultModel : targetModel, effort: ''}]))
-    const doc = panelDOM({generalDir: cwd, projects: [], tiers})
+    const settings = legacy ? {generalDir:cwd,projects:[],tiers} : await semanticSettings(host, join(cwd,'scope-'+round), tiers)
+    const doc = panelDOM(settings)
     const offset = endpoints.length, callCount = calls.length
     await withPanel(plugin, doc, legacy, async () => {
-      await doc.submit('在通用目录新建会话，用标准档写一首关于四季的短诗。')
+      await doc.submit(legacy ? '在通用目录新建会话，用标准档写一首关于四季的短诗。' : semanticRequest)
       const item = await doc.until(() => {
         const i = doc.item()
         if (i && ['done','failed','unknown','clarify'].includes(i.status)) return i
@@ -96,6 +99,8 @@ export async function checkProductionPanel({client, Service, host, endpoints, ca
         assert.deepEqual(trace.filter(s => s.startsWith('api/routerAgent/') || s === 'api/session/prompt'),
           ['api/routerAgent/infer','api/routerAgent/create','api/routerAgent/configure','api/session/prompt'])
         assert.deepEqual(calls.slice(callCount).map(c => c.model), [defaultModel, targetModel])
+        assert.equal(item.text,semanticRequest); assert.equal(item.project,settings.projects[1].path)
+        assert.equal(host.agents.get(item.sessionId).session.header.cwd,item.project)
         assert.deepEqual(host.agents.get(item.sessionId).model.current(), {provider, model: targetModel})
         assert.deepEqual(host.agentDefaultModel.currentSelection(), {provider, model: defaultModel})
         console.log('PASS production panel ' + round + ': form → infer/create/configure/prompt → done via non-root Cordis fiber')
@@ -103,6 +108,11 @@ export async function checkProductionPanel({client, Service, host, endpoints, ca
     })
   }
   try {
+    const phase = process.env.DSH_SMOKE_PHASE
+    if (phase === 'slow-infer' || phase === 'slow-infer-0.2.1') {
+      const old = phase === 'slow-infer-0.2.1'
+      await checkSlowInfer({old, plugin:await loadBundle(old?'legacy-slow':'current'), host, withPanel, routing, endpoints, cwd, provider}); return
+    }
     const production = await loadBundle('current')
     if (!routing) {
       const old = new URL('./legacy.json', import.meta.url)

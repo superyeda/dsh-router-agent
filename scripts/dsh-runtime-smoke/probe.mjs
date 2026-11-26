@@ -7,6 +7,7 @@ import { dirname, join } from 'node:path'
 import { readFile, stat } from 'node:fs/promises'
 import { checkProductionPanel } from './panel.mjs'
 import { routingModels } from './routing.mjs'
+import { inferFetch, semanticReply } from './slow-infer.mjs'
 import { installStockSessions } from './stock-session.mjs'
 import { assertStartup, reproduceOldHost, checkRecovery, checkChangedLive, legacyRequest } from './startup.mjs'
 
@@ -14,9 +15,11 @@ const scratch = dirname(fileURLToPath(import.meta.url))
 const home = process.env.DSH_HOME
 const cwd = process.cwd()
 assert.match(scratch, /^\/private\/tmp\/dsh-router-smoke\.[a-zA-Z0-9]{8}$/)
-assert.equal(home, join(scratch, 'dsh'))
-assert.equal(process.env.HOME, join(scratch, 'home'))
-assert.equal(cwd, join(scratch, 'work'))
+const phase = process.env.DSH_SMOKE_PHASE, oldSlow = phase === 'slow-infer-0.2.1', slow = oldSlow || phase === 'slow-infer'
+const state = slow ? join(scratch, phase) : scratch
+assert.equal(home, join(state, 'dsh'))
+assert.equal(process.env.HOME, join(state, 'home'))
+assert.equal(cwd, join(state, 'work'))
 const req = createRequire(join(process.env.DSH_BUNDLE, 'package.json'))
 const requireURL = name => pathToFileURL(req.resolve('@deepseek-ai/' + name)).href
 const pkg = name => import(requireURL(name))
@@ -24,7 +27,7 @@ const version = req('@deepseek-ai/dsh/package.json').version
 assert.equal(version, '0.2.2-rc.5')
 // The production entry is staged in our empty temp home, not installed. Resolve
 // only its DSH peers as they would resolve after installation in the ASAR tree.
-const pluginDirs = ['./host/', './old-host/'].map(dir => new URL(dir, import.meta.url).href)
+const pluginDirs = ['./host/', './old-host/', './legacy-slow-host/'].map(dir => new URL(dir, import.meta.url).href)
 registerHooks({resolve(spec, context, next) {
   if (pluginDirs.some(dir => context.parentURL?.startsWith(dir)) && spec.startsWith('@deepseek-ai/')) {
     return {shortCircuit: true, url: pathToFileURL(req.resolve(spec)).href}
@@ -40,6 +43,7 @@ const provider = 'smoke-memory', defaultModel = 'default-local', targetModel = '
 const calls = []
 const replyText = 'synthetic queued answer'
 const routing = routingModels()
+if (slow) routing.inferTrace = []
 // Keep one unrelated native turn in flight until the adapter observes its own
 // request queued. A deterministic gate, not polling or a race against a timer.
 const busy = Promise.withResolvers(), release = Promise.withResolvers()
@@ -61,10 +65,7 @@ class MemoryModel extends LlmAdapter {
     if (model === defaultModel && system?.startsWith('你是只读的中文任务分流分类器')) {
       // Give the actual panel planner a valid bounded classification; a silent
       // fallback after receiving a malformed infer response must not pass.
-      const {items} = JSON.parse(messages[0].content[0].text)
-      assert.deepEqual(tools, [])
-      text = JSON.stringify({items: items.map(({key, text}) => ({key, relation: 'different', candidate: null,
-        tier: 'standard', requestQuote: text.slice(0, 32), candidateQuote: ''}))})
+      text = semanticReply({messages,tools})
     }
     yield* chunks(text)
   }
@@ -91,7 +92,7 @@ async function main() {
   // The full web/stdio profile demands network/tool providers; none are booted.
   const {entryListSchema} = await pkg('cordis-plugin-include')
   const ledger = process.env.DSH_SMOKE_PHASE==='ledger', automatic=process.env.DSH_SMOKE_PHASE==='automatic'
-  const routePhase = automatic || ledger || ['routing','routing-cold'].includes(process.env.DSH_SMOKE_PHASE)
+  const routePhase = slow || automatic || ledger || ['routing','routing-cold'].includes(process.env.DSH_SMOKE_PHASE)
   const {load} = req('js-yaml'), enabled = new Set(['persona','agent-instructions','time-context','tool-todo'])
   const presets = await Promise.all((routePhase ? ['standard','ptc'] : ['standard']).map(async id => {
     const filename = req.resolve('@deepseek-ai/dsh-web-app/presets/' + id + '.patch.yml')
@@ -108,7 +109,7 @@ async function main() {
     ['session-projection'], ['session-persistence-jsonl', {root: join(home, 'sessions')}],
     ['system-prompt', {includeRuntimeContext: false, includeHarnessIdentity: false}],
     ['tools'], ['tool-executor-native'], ['agent'], ['agent-loop', {agents: []}],
-    ['agent-default-model', {provider, model: automatic ? routing.models.standard : defaultModel}], ['fs-local'], ['working-directory'],
+    ['agent-default-model', {provider, model: automatic || slow ? routing.models.standard : defaultModel}], ['fs-local'], ['working-directory'],
     ['storage'], ['storage-json', {root: join(home, 'storage')}], ['storage-domain', {backend: 'json'}],
     ['workspace'], ['agent-preset-registry', {default:'standard', ...(routePhase ? {selectedDefault:'ptc'} : {})}], ...presets.map(preset => ['agent-preset',preset]),
     // Same sandbox policy, executor, approval and Agent creation listener as
@@ -153,9 +154,11 @@ async function main() {
   }
   const hot = !routePhase && await reproduceOldHost(host, owner, scratch, 'reload')
   stage = 'register production Cordis plugin'
-  const routerHost = await import('./host/index.mjs')
-  const {routerAgentRemoteContribution} = await import('./host/contract.mjs')
-  const {createDshAdapter} = await import('./dsh-client/adapter.mjs')
+  if (oldSlow) {
+    const {name,version} = JSON.parse(await readFile(new URL('./legacy-slow-host/package.json', import.meta.url), 'utf8'))
+    assert.equal(name,'dsh-router-agent'); assert.equal(version,'0.2.1')
+  }
+  const routerHost = oldSlow ? await import('./legacy-slow-host/index.mjs') : await import('./host/index.mjs')
   await host.plugin(routerHost)
   assert.ok(host.typert.getPackage('dsh-router-agent', 'host'))
   const handler = host.connection.createSharedFetchHandler('/api')
@@ -163,7 +166,9 @@ async function main() {
   await client.plugin(ctx => installConnection(ctx, {interactions: participation, transport: {
     fetch(route, init) {
       endpoints.push(route)
-      return handler.fetch(new Request(new URL(route, 'http://smoke.invalid/'), init), owner)
+      const request = new Request(new URL(route, 'http://smoke.invalid/'), init)
+      if (slow && route==='api/routerAgent/infer') return inferFetch(handler, request, owner, routing.inferTrace)
+      return handler.fetch(request, owner)
     },
     async *openStream(endpoint, payload, signal, uplink) {
       if (ledger) streams.push({endpoint,payload})
@@ -176,10 +181,12 @@ async function main() {
   stage='install stock Session / Workspace clients'
   const installDesktop=await installStockSessions({client,host,req,pkg})
   if (routePhase) {
-    stage = automatic ? 'default automatic routing / accepted-context continuity / scope' : ledger ? 'single delivery / compact journal / original live Session pane' : 'three-tier production form / repeat-work session / independent presets'
+    stage = slow ? phase + ' / slow semantic form submission' : automatic ? 'default automatic routing / accepted-context continuity / scope' : ledger ? 'single delivery / compact journal / original live Session pane' : 'three-tier production form / repeat-work session / independent presets'
     await checkProductionPanel({client, Service, host, endpoints, calls, provider, cwd, defaultModel, targetModel, replyText, routing, installDesktop, streams})
     return
   }
+  const {routerAgentRemoteContribution} = await import('./host/contract.mjs')
+  const {createDshAdapter} = await import('./dsh-client/adapter.mjs')
   const withdrawRootProbe = await client.remote.$mount(routerAgentRemoteContribution)
   ok('DSH ' + version + ': real Cordis + Typert Host and Client; only provider ' + provider)
 

@@ -48,7 +48,9 @@ export async function checkLedger({host,client,production,withPanel,endpoints,st
       const id=item.sessionId
       assert.deepEqual(item.dependsOn??[],[]); assert.equal(item.text,multiStep)
       assert.equal(await pause.entered.promise,multiStep,'every line and punctuation mark reaches the executing model')
-      assert.deepEqual(await ids(),[id]); assert.deepEqual(endpoints.slice(initialTrace).filter(ctrl),['api/routerAgent/infer','api/routerAgent/create','api/routerAgent/configure','api/session/prompt'])
+      // Explicit sole project + fixed edit tier + no prior Session: advisory
+      // inference cannot change this decision. Keep every write RPC exact.
+      assert.deepEqual(await ids(),[id]); assert.deepEqual(endpoints.slice(initialTrace).filter(ctrl),['api/routerAgent/create','api/routerAgent/configure','api/session/prompt'])
       const originals=await rows(host,id), input=human(originals)
       assert.deepEqual(input.map(e=>[e.data.source.rpcId,textOf(e.data)]),[[item.requestId,multiStep]])
       const trace=endpoints.length, streamStart=streams.length, nav=navigations.length

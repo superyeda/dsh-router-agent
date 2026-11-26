@@ -16,8 +16,10 @@ export function bindPanelTransport(ctx) {
     newAdapter: () => createDshAdapter(remote),
     async infer({system,user,provider,model,effort,signal}) {
       const r = await remote.routerAgent.infer({system,user,provider,model,...(effort ? {effort} : {})},signal);
-      if (!r.ok) throw Error(r.error?.message || '意图模型调用失败');
-      return r.value.text;
+      // Keep the structured gateway code; never surface a provider's raw
+      // message as a global execution/connection failure in the panel.
+      if (r?.ok!==true) throw Object.assign(Error('意图分类调用未完成'),{code:r?.error?.code});
+      return r.value?.text; // The planner independently validates the complete reply.
     },
   };
 }

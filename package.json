@@ -1,6 +1,6 @@
 {
   "name": "dsh-router-agent",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "description": "一次对话对应一个 DSH 会话：跨项目路由、紧凑任务记录和页内原会话侧栏",
   "repository": {"type": "git", "url": "git+https://github.com/superyeda/dsh-router-agent.git"},
   "type": "module",

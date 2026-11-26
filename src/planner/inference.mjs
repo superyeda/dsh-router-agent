@@ -1,16 +1,22 @@
 import {autoProjectLabels, similarity} from './routing.mjs';
+import {limits as hostLimits} from '../host/contract.mjs';
 
 // All I/O is injected. The adapter, NOT this prompt, is responsible for using
 // a real tool-free model endpoint, enforcing server-side deadlines and token caps.
 export const LIMITS = Object.freeze({textChars:4096, candidates:5, recentSessions:2,
   recentMessages:2, snippetChars:160, inferCandidates:3, inferProjects:4, requestBytes:12288, replyBytes:6144,
-  recentMs:1200, inferMs:6500});
+  // The real host bounds the complete tool-free call. Leave time for its typed
+  // result to cross the RPC link; this timer is only a lost-reply backstop.
+  recentMs:1200, inferMs:hostLimits.timeoutMs+5_000});
 const bytes = s => new TextEncoder().encode(s).byteLength;
 export async function bounded(fn, ms) {
   const controller = new AbortController(); let timer;
   try {
     return await Promise.race([Promise.resolve().then(()=>fn(controller.signal)),new Promise((_, reject)=>{
-      timer=setTimeout(()=>{ controller.abort(); reject(Error('deadline')); },ms);
+      timer=setTimeout(()=>{
+        const err=new DOMException('Local deadline exceeded','TimeoutError');
+        reject(err);controller.abort(err);
+      },ms);
     })]);
   } finally { clearTimeout(timer); }
 }
@@ -45,6 +51,25 @@ function projectOptions(st,cat) {
   }
   return [...pool.values()].slice(0,LIMITS.inferProjects);
 }
+// Provider/transport text can carry paths, prompts or credentials. Keep only
+// actionable categories in the individual item's reason, never that raw error.
+function inferFailure(e) {
+  const code=e?.code;
+  if(code==='remote-access/denied') throw Object.assign(Error('当前连接没有个人路由授权；未投递。'),{code});
+  // This gateway code can mean the caller, its RPC mount, or the host
+  // invalidated the invocation. Our backstop settles as TimeoutError first.
+  // Never start an execution from an otherwise cancelled invocation.
+  if(code==='gateway/cancelled' || code==='router-agent/cancelled' || e?.name==='AbortError') {
+    throw Object.assign(Error('本次路由请求已取消；未投递。'),{code:code || 'gateway/cancelled'});
+  }
+  if(code==='router-agent/timeout' || e?.name==='TimeoutError') return '意图分类等待超时';
+  if(code==='router-agent/model-unavailable') return '所选快速档不可用，可检查路由设置';
+  if(code==='router-agent/inference-failed') return '意图模型请求失败';
+  if(code==='router-agent/busy') return '意图分类服务正忙';
+  if(code==='gateway/internal') return '未收到意图分类的远端结果';
+  if(code==='router-agent/output-invalid') return '意图模型输出未通过校验';
+  return '意图分类调用未完成';
+}
 // <= one request per plan. Do not add cwd, raw IDs, unrelated sessions, model
 // configuration or transcripts. User-supplied text and titles are not redacted.
 export async function advise(st, infer, cat) {
@@ -59,8 +84,10 @@ export async function advise(st, infer, cat) {
     candidates:offered.map((r,i)=>({ref:'c'+(i+1),title:r.titleRelevant || !st.auto?sanitize(r.s.title).slice(0,96):'',...(r.recent.length?{recent:r.recent.map(sanitize)}:{})}))};
   const user=JSON.stringify({version:2,items:[input]});
   if (bytes(SYSTEM)+bytes(user)>LIMITS.requestBytes) return {advice:null,note:'规则（分类请求超出预算，未发送）'};
+  let raw;
+  try { raw=await bounded(signal=>infer({system:SYSTEM,user,signal}), LIMITS.inferMs); }
+  catch(e) { return {advice:null,note:'规则（'+inferFailure(e)+'，本次使用本地判断）'}; }
   try {
-    const raw=await bounded(signal=>infer({system:SYSTEM,user,signal}), LIMITS.inferMs);
     if (typeof raw!=='string' || raw.length>LIMITS.replyBytes || bytes(raw)>LIMITS.replyBytes) throw Error('size');
     const data=JSON.parse(raw);
     // Reject a model-generated split in its entirety. Never take its first item.
@@ -91,5 +118,5 @@ export async function advise(st, infer, cat) {
     const pair=row && item.relation==='same' && similarity(item.requestQuote,item.candidateQuote,cat);
     const quotesSupport=!!pair && !pair.conflict && pair.concrete && pair.score>=3;
     return {advice:{relation:item.relation,tier:item.tier,row,projectHint,quotesSupport},note:'模型建议经本地校验'};
-  } catch { return {advice:null,note:'规则（模型不可用、超时或输出未通过校验）'}; }
+  } catch { return {advice:null,note:'规则（意图模型输出未通过校验，本次使用本地判断）'}; }
 }

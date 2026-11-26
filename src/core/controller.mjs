@@ -13,7 +13,7 @@ const capResult = 16000;
 /** Single-destination outbox; v1 task graphs already on disk keep their original receipts. */
 export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>crypto.randomUUID(), now=()=>Date.now()}) {
   let doc = emptyDocument(), sessions=[], workspaces=[], catalog=[], connected=false, notice='', stopped=false, writing=false, storageFailure=null;
-  const listeners = new Set();
+  const listeners = new Set(), lifetime=new AbortController();
   let paneIndex=null;
   try { doc=journal.read(); } catch(e) { notice=detail(e); storageFailure=e; }
   // v0.1.1 persisted only the sanitized English message, not its error code.
@@ -206,12 +206,23 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
     try {await resources();notice='';} catch(e) {catalog=[];notice='模型目录不可用。明确的旧任务仍可续接，新会话暂不派发：'+detail(e);}
     const effective={...doc.settings,tiers:resolveTiers(doc.settings,catalog)};
     const recent=async sid=>{if(!sessions.some(s=>s.id===sid)) throw Error('候选会话不在许可范围。');return adapter.recent(sid);};
-    const classify=!infer?undefined:async data=>{
-      try{return await infer({...data,...checkTier(effective.tiers.fast,catalog)});}
-      catch(e){notice='意图模型不可用，本次使用本地路由规则：'+detail(e);throw e;}
+    const classify=!infer?undefined:async ({signal,...data})=>{
+      ensureLive();let selection;
+      try {selection=checkTier(effective.tiers.fast,catalog);} catch {
+        throw Object.assign(Error('快速档不可用'),{code:'router-agent/model-unavailable'});
+      }
+      // Cancelling optional advice must release the browser journal lock even
+      // if a transport ignores abort. Only this preview owns its eventual reason;
+      // a tardy reject cannot overwrite a newer submission's notice.
+      const stop=signal?AbortSignal.any([signal,lifetime.signal]):lifetime.signal;
+      stop.throwIfAborted();let abort;
+      const closed=new Promise((_,reject)=>{abort=()=>reject(stop.reason);stop.addEventListener('abort',abort,{once:true});});
+      const call=Promise.resolve().then(()=>{stop.throwIfAborted();return infer({...data,...selection,signal:stop});});
+      try {return await Promise.race([closed,call]);}
+      finally {stop.removeEventListener('abort',abort);}
     };
     const planned=await plan({text:input,settings:structuredClone(effective),sessions:work.forPlan(structuredClone(sessions)),getRecent:recent,infer:classify});
-    return {effective,planned};
+    ensureLive();return {effective,planned};
   }
   // The list and the task must independently name this session. A stored ID,
   // creation receipt, or recovered observation alone cannot open a chat. The
@@ -354,11 +365,17 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
       await dispatch(item);
     });},
 
-    async tick() {return operation(async()=>{
-      if(!doc.tasks.some(t=>t.items.some(i=>observing.has(i.status) || ['new','dispatching'].includes(i.status)))) return;
-      await roster();await reconcile(false);
-    });},
-    dispose() {stopped=true;listeners.clear();unsub();},
+    async tick() {
+      // A poll scheduled during a slow preview should not queue up behind its
+      // first admission and immediately read a half-published native turn.
+      // The panel polls again normally; manual refresh still waits for the lock.
+      if(writing) return;
+      return operation(async()=>{
+        if(!doc.tasks.some(t=>t.items.some(i=>observing.has(i.status) || ['new','dispatching'].includes(i.status)))) return;
+        await roster();await reconcile(false);
+      });
+    },
+    dispose() {stopped=true;lifetime.abort();listeners.clear();unsub();},
   };
   return api;
 }

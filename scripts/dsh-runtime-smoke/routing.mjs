@@ -24,8 +24,9 @@ export function routingModels() {
   const observations = []
   const gate = Promise.withResolvers(), entered = Promise.withResolvers()
   return {models, observations, gate, entered, active:false, holdFirst:false,
-    async respond({model, messages, tools}) {
-      if (this.autoResponder) return this.autoResponder({model,messages,tools})
+    async respond(options) {
+      if (this.autoResponder) return this.autoResponder(options)
+      const {model, messages, tools} = options
       // DSH appends time-context and other notice messages with role=user.
       // Inspect only the latest synthetic task; never mistake a notice for it.
       const human = messages.filter(m => m.role === 'user').flatMap(m => m.content ?? []).filter(b=>b.type==='text').map(b=>b.text)
@@ -146,8 +147,10 @@ export async function checkRouting({host, native:nativeAPI, cwd, provider, produ
       assert.deepEqual(a.events.filter(e=>e.type==='model/selection').map(e=>e.data.model),[models.fast])
       assert.deepEqual(b.events.filter(e=>e.type==='model/selection').map(e=>e.data.model),[models.deep])
       assert.deepEqual(routing.observations.slice(start).filter(x=>x.kind==='execute').map(x=>[x.model,x.text]),[[models.fast,first.text],[models.fast,second.text],[models.deep,third.text]])
-      const inferences = routing.observations.slice(start).filter(x=>x.kind==='infer')
-      assert.ok(inferences.length && inferences.every(x=>x.model===models.fast),'classification must actually execute, only on fast')
+      // All three decisions here are fixed: only project + typo, admitted
+      // same-work reuse, then only project + architecture. The separate
+      // two-project semantic fixtures require exactly ONE real fast inference.
+      assert.deepEqual(routing.observations.slice(start).map(x=>x.kind), ['execute','execute','execute'], 'no classifier for these locally fixed targets and tiers')
       await writeFile(localJournal,doc.snapshot(),{flag:'wx',mode:0o600}) // private, disposable browser fixture
       console.log('PASS one unnamed project: fast typo → busy/page-reentry paraphrase reuses SAME session without create/configure → unrelated architecture uses distinct deep Agent; confirmed by JSONL and model calls')
     })
