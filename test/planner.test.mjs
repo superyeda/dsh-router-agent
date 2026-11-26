@@ -4,6 +4,7 @@ import {planRequest} from '../src/planner/index.mjs';
 import {LIMITS} from '../src/planner/inference.mjs';
 
 const settings={projects:[{name:'商城',path:'/work/shop'},{name:'Atlas',path:'/work/atlas'}],generalDir:'/work/general',tiers:{fast:'unused-fast',standard:'unused-standard',deep:'unused-deep'}};
+const confirm=s=>({...s,routingMode:'confirm'});
 const row=(id,cwd,title,time=20,extras={})=>({id,cwd,title,updatedAt:time,busy:false,...extras});
 const make=(text,o={})=>planRequest({text,settings,sessions:[],...o});
 const one=async(text,o)=>{
@@ -43,10 +44,11 @@ test('模糊延续 / 多个同工作候选：给 ID 但不能用一个由时间�
   const c=await one('继续刚才那个',{sessions:[sessions[0]]});assert.equal(c.decision,'clarify');assert.deepEqual(c.candidates,['old']);
 });
 
-test('没有裸项目名也能延续唯一、具体的已知事项；无明确目录的代码新任务先问',async()=>{
+test('没有裸项目名也能延续唯一、具体的已知事项；保守模式才对无明确目录的代码新任务先问',async()=>{
   const sessions=[row('same','/work/shop','修复登录 401'),row('other','/work/atlas','登录文档')];
   assert.equal((await one('继续修复刚才的登录 401',{sessions})).sessionId,'same');
-  assert.equal((await one('对订单模块进行重构',{sessions})).decision,'clarify');
+  assert.equal((await one('对订单模块进行重构',{sessions,settings:confirm(settings)})).decision,'clarify');
+  assert.equal((await one('对订单模块进行重构',{sessions})).project,'/work/shop');
   const only=await one('修复登录模块的 bug',{settings:{...settings,projects:[settings.projects[0]]},sessions});assert.equal(only.decision,'create');assert.equal(only.project,'/work/shop');
 });
 
@@ -58,10 +60,10 @@ test('精确目录和项目名，包括带空格或正则特殊字符的名字�
   assert.equal((await one('在商城项目写邮件',{settings:{...settings,projects:[...settings.projects,{name:'商城',path:'/else/shop'}]}})).decision,'clarify');
 });
 
-test('通用写作与问答只能用已配置通用目录；未知项目不降级到通用',async()=>{
+test('通用写作优先通用目录，保守模式不替缺失的通用目录选址；未知项目不降级',async()=>{
   for(const text of ['写一首短诗','请解释 HTTP 缓存是什么','在通用目录写封邮件','不涉及项目，写一篇文章']){const x=await one(text);assert.equal(x.decision,'create',text);assert.equal(x.project,null);}
   assert.equal((await one('给陌生项目写一封邮件')).decision,'clarify');
-  for(const dir of ['',undefined,'relative','/a/../b'])assert.equal((await one('写一首短诗',{settings:{...settings,generalDir:dir}})).decision,'clarify');
+  for(const dir of ['',undefined,'relative','/a/../b'])assert.equal((await one('写一首短诗',{settings:confirm({...settings,generalDir:dir})})).decision,'clarify');
 });
 
 test('会话 ID 只能明确点名且在当前精确目录；重复/未知/越界/前缀拒绝',async()=>{
@@ -122,7 +124,7 @@ test('真实模型契约：整段仅一次、匿名候选、逐字证据、同�
 test('模型语义候选只作建议：不存在同事项独立证据不能复用，模型也不能解除硬澄清',async()=>{
   const sessions=[row('cand','/work/shop','商城登录设计')];let modelCalls=0;
   const infer=async m=>{modelCalls++;return answer(m,i=>({relation:'same',candidate:i.candidates[0].ref,candidateQuote:i.candidates[0].title}));};
-  const x=await one('在商城项目跟进登录文档',{sessions,infer});assert.equal(x.decision,'clarify');assert.deepEqual(x.candidates,['cand']);assert.match(x.reason,/模型提出/u);
+  const x=await one('在商城项目跟进登录文档',{sessions,infer,settings:confirm(settings)});assert.equal(x.decision,'clarify');assert.deepEqual(x.candidates,['cand']);assert.match(x.reason,/模型提出/u);
   for(const t of ['在未知项目写邮件','在商城和 Atlas 项目继续上次的工作','继续会话 unauthorized'])assert.equal((await one(t,{sessions,infer})).decision,'clarify');assert.equal(modelCalls,1);
 });
 
@@ -131,7 +133,7 @@ test('分类回复严格校验：拒绝围栏、额外字段、未知 id/key/tie
   const patch=p=>s=>{const data=JSON.parse(s);Object.assign(data.items[0],p);return JSON.stringify(data);};
   const cases=[()=>'{', s=>'~~~json\n'+s+'\n~~~',()=> 'x'.repeat(LIMITS.replyBytes+1),patch({tier:'vendor-model'}),patch({relation:'dispatch'}),patch({key:'t0'}),patch({requestQuote:'伪造证据'}),patch({relation:'same',candidate:'real',candidateQuote:'登录 401'}),()=>' {"items":[]}',s=>{const d=JSON.parse(s);d.items.push({...d.items[0]});return JSON.stringify(d);},patch({project:'/etc'}),patch({dependsOn:[]}),patch({relation:'same',candidate:'c1',candidateQuote:'没有这个摘录'})];
   for(const corrupt of cases){let produced=false;const x=await one('继续修复商城的登录 401',{sessions,infer:async m=>{const raw=corrupt(answer(m));produced=true;return raw;}});assert.ok(produced);assert.equal(x.sessionId,'real');assert.match(x.reason,/未通过校验/u);}
-  const fail=await one('在商城项目跟进刚才的事情',{sessions,infer:async()=>{throw Error('untrusted secret');}});assert.equal(fail.decision,'clarify');assert.doesNotMatch(fail.reason,/untrusted secret/u);
+  const fail=await one('在商城项目跟进雷达的误报排查',{sessions,infer:async()=>{throw Error('untrusted secret');}});assert.equal(fail.decision,'clarify');assert.doesNotMatch(fail.reason,/untrusted secret/u);
 });
 
 test('请求和上下文预算：仅尾部有界摘录，长列表不静默丢项/截断，离线不需要模型',async()=>{
@@ -173,7 +175,8 @@ test('无继续词/无项目名：证实的标题或本地任务确定具体会�
     const x=await one('修复登录 401',{settings:conf,sessions:[oneExact],infer:m=>answer(m,()=>({relation:reply}))});assert.equal(x.sessionId,'s');assert.equal(x.project,'/work/atlas');
   }
   const two=[row('a','/work/shop','一般笔记',999,{workHints:[install1]}),row('b','/work/atlas','空会话',1,{workHints:[install1]})];
-  const both=await one(install2,{settings:conf,sessions:two,infer:unsure});assert.equal(both.decision,'clarify');assert.deepEqual(new Set(both.candidates),new Set(['a','b']));
+  const both=await one(install2,{settings:confirm(conf),sessions:two,infer:unsure});assert.equal(both.decision,'clarify');assert.deepEqual(new Set(both.candidates),new Set(['a','b']));
+  assert.equal((await one(install2,{settings:conf,sessions:two,infer:unsure})).decision,'create','普通新提交不猜重复会话');
   const explicit=await one('在 Atlas 项目另开会话：'+install2,{settings:conf,sessions:two});assert.equal(explicit.decision,'create');assert.equal(explicit.project,'/work/atlas');
   const notAllowed=await one(install2,{settings:conf,sessions:[row('bad','/work/atlas/sub','',1,{workHints:[install1]})]});assert.notEqual(notAllowed.sessionId,'bad');
 });
@@ -190,7 +193,7 @@ test('默认是用户明确的最后选项：唯一证据和手工选择优先�
   const named=row('s','/work/atlas','',1,{workHints:[install1]});assert.equal((await one(install2,{settings:conf,sessions:[named]})).sessionId,'s');
   for(const text of ['在外星项目实现预览组件','不用商城项目实现预览组件','在 /work/atlas/sub 实现预览组件','Edit /private/code/test.js','替我编译 /opt/foreign-tree','在商城和 Atlas 项目实现预览组件','继续上次的实现']) assert.equal((await one(text,{settings:conf})).decision,'clarify',text);
   assert.equal((await one('给我写一篇关于旅行的文章',{settings:conf})).project,null);
-  assert.equal((await one('实现光栅化预览组件',{settings:{...settings,defaultProject:'/work/shop/other'}})).decision,'clarify');
+  assert.equal((await one('实现光栅化预览组件',{settings:confirm({...settings,defaultProject:'/work/shop/other'})})).decision,'clarify');
 });
 
 test('项目展示名、目录 basename 与真实标题可以定位新工作；证据不够或多个时不按默认排除',async()=>{
@@ -198,10 +201,10 @@ test('项目展示名、目录 basename 与真实标题可以定位新工作；�
  const byBase=await one('在 recon-kit 项目增加新的检查组件',{settings:conf});assert.equal(byBase.project,'/work/recon-kit');
  const byDomain=await one('重构发票签发流程',{settings:conf});assert.equal(byDomain.project,'/work/recon-kit');assert.equal(byDomain.decision,'create');
  const ses=[row('a','/work/atlas','工具 Rasterizer 配置'),row('b','/work/shop','不公开的会话名称 PRIVATE_SECRET_TITLE')];let raw;
- const usingModel=await one('实现 Rasterizer 预览组件',{settings:conf,sessions:ses,infer:m=>{raw=m.user;return answer(m,i=>({project:i.projects[0].ref,projectQuote:'rasterizer'}));}});
+ const usingModel=await one('实现 Rasterizer 预览组件',{settings:conf,sessions:ses,infer:m=>{raw=m.user;return answer(m,i=>({project:i.projects[0].ref,projectQuote:i.projects[0].evidence.find(q=>q.toLowerCase()==='rasterizer')}));}});
  assert.equal(usingModel.project,'/work/atlas');assert.equal(usingModel.decision,'create');assert.match(usingModel.reason,/可核验/u);assert.doesNotMatch(raw,/\/work\/|PRIVATE_SECRET_TITLE/u);
- const malicious=await one('实现 Rasterizer 预览组件',{settings:conf,sessions:ses,infer:m=>answer(m,()=>({project:'p200',projectQuote:'rasterizer'}))});assert.equal(malicious.decision,'clarify');
- const ambiguous=await one('重构发票签发流程',{settings:{...conf,projects:[...conf.projects,{name:'发票云服务',path:'/other'}]}});assert.equal(ambiguous.decision,'clarify');
+ const malicious=await one('实现 Rasterizer 预览组件',{settings:confirm(conf),sessions:ses,infer:m=>answer(m,()=>({project:'p200',projectQuote:'rasterizer'}))});assert.equal(malicious.decision,'clarify');
+ const ambiguous=await one('重构发票签发流程',{settings:confirm({...conf,projects:[...conf.projects,{name:'发票云服务',path:'/other'}]})});assert.equal(ambiguous.decision,'clarify');
 });
 
 test('无继续/无项目也只读取已经筛选的少量具体候选；外部目录阻止整段投递，澄清保留完整复杂度',async()=>{
@@ -211,10 +214,12 @@ test('无继续/无项目也只读取已经筛选的少量具体候选；外部�
 });
 
 
-test('“当前/这个项目”仅在唯一授权工作项目中可执行；仍拒绝外部或多项目，不按默认猜',async()=>{
+test('“当前/这个项目”可用唯一项目或用户默认；保守模式保留未点名时的澄清',async()=>{
  for(const t of ['在当前项目修复锁竞争','给这个项目新增导出接口']){
    const a=await one(t,{settings:onlyProject});assert.equal(a.decision,'create',t);assert.equal(a.project,'/demo/north');assert.match(a.reason,/一个已授权/u);
-   const b=await one(t,{settings:{...settings,defaultProject:'/work/shop'}});assert.equal(b.decision,'clarify');
+   const c={...settings,defaultProject:'/work/shop'};
+   assert.equal((await one(t,{settings:c})).project,'/work/shop');
+   assert.equal((await one(t,{settings:confirm(c)})).decision,'clarify');
  }
  for(const t of ['在这个项目及 /outside 修改组件','在陌生项目修复锁竞争'])assert.equal((await one(t,{settings:onlyProject})).decision,'clarify',t);
 });
@@ -226,6 +231,6 @@ test('一般写作优先通用，已派给项目的独特邀请函则沿用原�
  for(const sessions of [[sim],[row('unrelated','/work/shop','',10,{workHints:['给活动主办方写一封邀请函']})],[row('sub','/work/atlas/tmp','',1,{workHints:[before]})]]) {
    const y=await one(after,{sessions});assert.equal(y.decision,'create');assert.equal(y.project,null);
  }
- const other=row('second','/work/shop','',100,{workHints:[before]});assert.equal((await one(after,{sessions:[bound,other]})).decision,'clarify');
+ const other=row('second','/work/shop','',100,{workHints:[before]});assert.equal((await one(after,{sessions:[bound,other],settings:confirm(settings)})).decision,'clarify');
  const gen=await one('在通用目录'+after,{sessions:[bound]});assert.equal(gen.decision,'create');assert.equal(gen.project,null);
 });

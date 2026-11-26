@@ -1,4 +1,5 @@
 import { css } from './style.mjs';
+import { isAutomaticRoute } from '../core/route-mode.mjs';
 import { STATUS, list, str, statusOf, matchesFilter, recordCaption, candidateAt, pairKey, catalogEntries, directoryOptions, checkSettings, uiKit, text, val, msg, options, order, shortcut, errorMessage } from './shared.mjs';
 import { createSettings } from './settings.mjs';
 import { createTask, hasItemDraft } from './tasks.mjs';
@@ -151,7 +152,7 @@ export function mountRouter(root,api) {
   const composeFoot=el('div','rt-compose-foot'); composeFoot.append(el('span','rt-muted','⌘ / Ctrl + Enter 提交'),composerFeedback,send);
   const setupWarning=el('div','rt-setup-warning'), setupReason=el('span');
   setupWarning.append(setupReason,button('去路由设置',()=>navigate('settings'),'rt-btn rt-quiet'));
-  const composeHead=el('div','rt-compose-head'); composeHead.append(el('h2','','新建任务'),el('p','rt-muted','整段内容只发往一个会话。去向不明确时，先请你选择。'));
+  const composeHead=el('div','rt-compose-head'), routeInfo=el('p','rt-muted'); composeHead.append(el('h2','','新建任务'),routeInfo);
   composeBox.append(composeHead,field('任务内容',compose),composeFoot,setupWarning);
   compose.addEventListener('input',()=>{memory.compose=compose.value; memory.rev++;});
   composeBox.addEventListener('submit',e=>{e.preventDefault();submit();}); shortcut(compose,submit);
@@ -207,6 +208,7 @@ export function mountRouter(root,api) {
     boardTab.setAttribute('aria-pressed',String(ctx.onBoard)); settingsTab.setAttribute('aria-pressed',String(!ctx.onBoard));
     workbench.setAttribute('data-pane',ctx.pane.update()?'open':'closed'); ctx.cleanup.update();
     settings.update(); markSettingsDirty();
+    text(routeInfo,isAutomaticRoute(ctx.state.settings)?'自动选工作区；同一件事续接，新工作另开会话。':'整段内容只发往一个会话；不确定时先请你选择。');
     send.disabled=!ctx.online || !ctx.ready || pending.has(composerFeedback); text(send,pending.has(composerFeedback)?'正在提交…':'提交任务');
     setupWarning.hidden=!ctx.loaded || ctx.ready; text(setupReason,'路由尚未就绪：'+(ctx.setupIssue || '请完成设置。'));
     const tasks=ctx.state.tasks, counts=new Map(); let attention=0, active=0;

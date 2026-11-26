@@ -1,6 +1,9 @@
 // This module only reasons about supplied metadata. In particular it never resolves
 // a path on the client (which need not be the same machine as the DSH host).
 import {workEvidence} from './grammar.mjs';
+import {autoProjectHints as workspaceEvidence,ordinaryDelivery} from './auto-evidence.mjs';
+export {autoProjectLabels} from './auto-evidence.mjs';
+export const autoProjectHints=(control,cat,raw=control)=>isGeneral(control,{auto:true})?[]:workspaceEvidence(control,cat,raw);
 
 export const TIERS = ['fast', 'standard', 'deep'];
 const basename = s => s?.split(/[\\/]/u).filter(Boolean).at(-1) ?? '';
@@ -18,7 +21,7 @@ export function catalog(settings = {}, sessions = []) {
   const general = isDir(settings?.generalDir) ? settings.generalDir : null;
   const seen = new Set(), duplicates = new Set(), rows = [];
   for (const s of Array.isArray(sessions) ? sessions : []) {
-    if (!s || typeof s.id !== 'string' || !s.id || s.id.length > 160) continue;
+    if (!s || typeof s.id !== 'string' || !s.id || s.id!==s.id.trim() || s.id.length > 160 || /[\x00-\x1f]/u.test(s.id)) continue;
     if (seen.has(s.id)) duplicates.add(s.id);
     seen.add(s.id);
     if (!roots.has(s.cwd) && (!general || s.cwd !== general)) continue;
@@ -27,7 +30,11 @@ export function catalog(settings = {}, sessions = []) {
     // admitted user requests, not fetched conversation history or model input. Never
     // use a truncated hint as identity evidence: its distinguishing suffix may matter.
     const hints=Array.isArray(s.workHints) ? s.workHints.slice(-6).filter(h=>typeof h==='string' && h.trim() && h.length<=4096) : [];
-    rows.push({id:s.id,cwd:s.cwd,title:typeof s.title === 'string' ? s.title.slice(0,240) : '',hints,busy:s.busy===true,time:Number.isFinite(time)?time:0});
+    // Only the local acceptance ledger may supply recency. Native updatedAt is
+    // still a display tie-break, never an implicit previous delivery.
+    const lastRoutedAt=Number.isSafeInteger(s.lastRoutedAt) && s.lastRoutedAt>0 ? s.lastRoutedAt : null;
+    rows.push({id:s.id,cwd:s.cwd,title:typeof s.title === 'string' && s.title.length<=240 ? s.title : '',hints,busy:s.busy===true,
+      time:Number.isFinite(time)?time:0,...(lastRoutedAt!==null?{lastRoutedAt}:{})});
   }
   const defaultProject=roots.has(settings?.defaultProject)?settings.defaultProject:null;
   return {roots, general, defaultProject, rows:rows.filter(s => !duplicates.has(s.id)).sort((a,b)=>b.time-a.time || a.id.localeCompare(b.id))};
@@ -37,17 +44,20 @@ export const wantsNew = text => /(?:另(?:开|起|建)|新(?:开|建|起)|单独
 export const follows = text => /继续|接着(?:做|改|查|修|写)|上(?:一|次|回)(?:个|的|说|那|提|没|我们)?|刚才|之前(?:的|那|提|说|没)|那个|那次|昨天(?:的|那|没)|还是上|原(?:来|先)的|跟进|接上|回到.{0,16}会话|进展(?:如何|怎样)|(?:修|做|查|写)(?:完|好)了吗|接续/u.test(text) && !wantsNew(text);
 export {tierFor, chooseTier} from './complexity.mjs';
 // Separate asking about technology from asking to change a local implementation.
-export function isGeneral(t) {
+export function isGeneral(t,{auto=false}={}) {
   const qa = /解释|科普|介绍(?:一下)?|什么是|是什[么麼]|为什么|如何理解|有何区别|有什么区别|如何.{0,12}(?:工作|实现|使用|理解)|(?:该|应该|可以|能|要)?怎么(?:做|用|实现|理解|选|工作)|讲讲|回答|举.{0,2}例子|\b(?:explain|what(?:'s| is| are)|why (?:is|do)|how (?:does|do|to))\b/iu.test(t);
+  const everydayAdvice=/(?:如何|怎样|怎么(?:样)?|有什么|有何)(?:才能|应该|能|可以|来)?(?:准备|应对|申请|办理|挑选|安排|看待|学习).{0,24}(?:面试|求职|病假|旅行|签证|考试|邮件|简历)|(?:面试|病假|签证).{0,12}(?:该|应该)?(?:如何|怎么|怎样)(?:准备|申请|办理)/u.test(t);
   const writing = /(?:写|起草|生成|编|拟|润色|修改|想|提供|给|来|做|列|整理|制作|设计|规划).{0,20}(?:邮件|信件|一封信|文章|小说|故事|文案|短文|诗|通知|提纲|祝福|标语|标题|演讲稿|邀请函|周报|日报|读书笔记|说明文|食谱|行程|建议|清单)|(?:翻译|改写|概括|总结).{0,12}(?:下[面列]|这(?:句话|段|篇)|成英文|为中文|翻成)|(?:翻译|科普)[：:\s]|(?:给|提).{0,3}(?:我|点).{0,6}建议|\b(?:write|draft|translate|rewrite)\b.{0,24}\b(?:email|poem|story|article|sentence)\b/iu.test(t);
   const privateContext=/(?:这个|当前|现有|我们(?:的)?|我们的|本|仓库内)(?:项目|仓库|工程|实现|代码|函数|接口|系统|目录)|(?:读取|打开|扫描|运行|提交|修改|编辑|删除|新增|重构|排查|修复|更新|改正|改掉|部署).{0,12}(?:代码|模块|脚本|接口|组件|用例|函数|文件|目录|仓库|构建|登录|注册|readme)|(?:\b[\w./-]+\.(?:md|m?[jt]sx?|py|json|rs|go|css|java|html|yaml|yml)\b).{0,30}(?:改|修|查|写|加|补)|(?:在|把|给|对).{0,30}\b[\w./-]+\.(?:md|m?[jt]sx?|py|json|rs|go|css|java|html|yaml|yml)\b/iu.test(t);
-  return (qa || writing) && !privateContext;
+  return (qa || writing || auto && everydayAdvice) && !privateContext;
 }
 export function actionable(t) {
   return /写|编|修|改|做|查|对账|润色|看|问|回答|解释|科普|翻译|迁移|优化|重构|对比|比较|调查|分析|设计|梳理|整理|总结|生成|实现|开发|新增|添加|创建|提交|投递|递交|网申|申请|报名|填写|上传|办理|预约|构建|部署|集成|审|评估|制作|调整|检查|准备|搭建|调试|验证|测试|跑|运行|计划|安排|列|删|安装|升级|起草|规划|接入|更新|补|研究|配置|解决|处理|跟进|\b(?:fix|add|change|replace|design|run|test|debug|optimi[sz]e|create|implement|refactor|explain|write|update|compare|review|build|draft|delete)\b/iu.test(t);
 }
-export function projectWork(t) {
-  return !isGeneral(t) && (/模块|架构|系统|代码|脚本|程序|开发|配置|构建|编译|测试|集成|部署|设计|实现|重构|迁移|排查|开发|修复|缺陷|错误|界面|登录|支付|订单|服务|接口|修订|应用|小工具|应用程序|投递|递交|网申|简历|应聘|招聘|求职|面试|\b(?:readme|bug|api|cli|ui|css|html|typescript|debug|build|fix|implement|refactor|deploy|code|script|architecture|test|component|feature|unit test|node|python|javascript)\b|[\w./-]+\.[a-z][a-z0-9]{0,8}\b/iu.test(t));
+export function projectWork(t,{auto=false}={}) {
+  // Generic delivery is not evidence of recruitment or code work.
+  if (ordinaryDelivery(t)) t=t.replace(/投递|递交/gu,'');
+  return !isGeneral(t,{auto}) && (/模块|架构|数据库|表结构|\bschema\b|系统|代码|脚本|程序|开发|配置|构建|编译|测试|集成|部署|设计|实现|重构|迁移|排查|开发|修复|缺陷|错误|界面|页面|按钮|函数|组件|报错|卡死|崩溃|登录|支付|订单|服务|接口|修订|应用|小工具|应用程序|投递|递交|网申|简历|应聘|招聘|求职|面试|\b(?:readme|bug|api|cli|ui|css|html|typescript|debug|build|fix|implement|refactor|deploy|code|script|architecture|test|component|feature|unit test|node|python|javascript)\b|[\w./-]+\.[a-z][a-z0-9]{0,8}\b/iu.test(t));
 }
 
 // Recurring WORK is a domain, not a bare verb: 申请/填写/上传 alone can mean a
@@ -69,9 +79,52 @@ export function workflowOwners(control, cat) {
   return owners;
 }
 
+// Incidental vocabulary is not an explicit destination. It may still contribute
+// a narrow semantic hint (e.g. billing), but “fix this page” is not permission
+// to send to a project merely named “页面”. Explicit addresses remain exact.
+const incidentalName=/^(?:项目|系统|开发|测试|应用|服务|流程|管理|数据|页面|界面|内容|文档|代码|通用|工具|project|web|app|tools?|api|data|docs?|service|test|system|main|work|workspace|billing)$/iu;
+const addressLeft=/(?:在|到|去|进|给|为|进入|选择|使用|发往|发到|切到|指定|项目|目录|工作区|路径|仓库|工程|\b(?:in|into|at|under|to|use|using|select|workspace|project|repo|directory|folder|cwd))\s*[:：=]?\s*$/iu;
+const addressRight=/^\s*(?:项目|目录|工作区|仓库|工程|\b(?:workspace|project|repository|repo|directory|folder)\b)/iu;
+const addressedName=(text,start,len)=>addressLeft.test(text.slice(0,start)) || addressRight.test(text.slice(start+len));
+const scopeWord=/工作区|项目|仓库|工程|目录|路径|\b(?:workspaces?|projects?|repositories|repository|repos?|folders?|directories|directory|cwd)\b/giu;
+const locationVerb=/(?:切换到|进入|回到|选择|选用|使用|打开|转到|投递到|切到|发(?:送)?(?:到|往)|(?:在|到|去|给|为)|\b(?:in|into|inside|from|under|at|use|using|select|switch to|send to)(?:\s+the)?)\s*$/iu;
+const classifier=/(?:这个|该|本|此|当前|目前|通用|默认|已选的?|同一个|一个|这个新|新建(?:的)?|新|任意|每个|各个|无|不涉及|不指定|不关联|做个|搭个|个|\b(?:new|current|this|another|each|general|default|selected))$/iu;
+const namespace=/^(?:计划|模板|管理|经理|成本|预算|排期|进度|汇报|周报|说明|经验|建议|列表|名称|结构|路径|示例|资料|案例|文档|\s+(?:plan|schedule|template|management|structure|name|list|example|report|budget|status|documentation)\b)/iu;
+function autoScopeConflict(marked) {
+  const denied=/(?:不要|不用|不在|不去|不使用|别|勿|排除|不是|不选|放弃|不发(?:送)?到|\b(?:not in|do not (?:use|select)|avoid|exclude))\s*(?:(?:再|把它|在|用|选择|使用|发到|发往|选|the|通用的|通用|已选的|已选|默认的|默认|项目|工作区|目录|路径|仓库|工程|workspace|directory|project)\s*){0,5}(?:@target@|通用(?:工作区|目录)|general (?:directory|workspace))|(?:@target@|通用目录)\s*(?:以外|之外|除外)/iu;
+  if (denied.test(marked) || /@literal@\s*(?:项目|工程|仓库|工作区|目录)|(?:项目|工程|工作区|目录)\s*[:：=]?\s*@literal@/u.test(marked)) return true;
+  // Joined coordinates cannot be narrowed to just the one known member.
+  const pair=/(?:[\w.-]+|[\p{Script=Han}]{1,24})\s*(?:和|及|与|或者?|还是|\band\b|\bor\b)\s*@target@\s*(?:项目|工程|目录|仓库|工作区|workspace|project|repos?itory|folder)|@target@\s*(?:(?:项目|工作区|目录|workspace|project)\s*)?(?:还是|或(?:者)?|和|与|及|\band\b|\bor\b)\s*[^，。；;@]{1,40}?(?:项目|工程|目录|仓库|工作区|workspace|project|repos?itory|folder)/iu;
+  if(pair.test(marked))return true;
+  for (const m of marked.matchAll(scopeWord)) {
+    const left=marked.slice(0,m.index).split(/[，。；;！!？?\n]/u).at(-1).trimEnd().slice(-64);
+    const rest=marked.slice(m.index+m[0].length),right=rest.trimStart();
+    if (/@target@(?:的)?$/u.test(left) || /^(?:[:：=名]\s*)?@target@/u.test(right)) continue;
+    // “项目: Ghost” or “目录名为 Omega” is a selector even without a verb.
+    if (/^(?:[:：=#]|(?:名为|名叫|叫做|叫作)|\b(?:named|called)\s+)/iu.test(right)) return true;
+    // “在火星工作区” / “in Ghost workspace”; a recognizable location slot
+    // before a noun is different from asking for a project plan/template.
+    const owner=/(?:在|到|去|给|为|进入|使用|选择|切换到|发往|\b(?:in|into|at|use|using|under|from|select|to)\s+(?:the\s+)?)\s*([\p{L}\d_.-][\p{L}\d_. -]{0,35})$/iu.exec(left);
+    if (owner && !/^(?:这个|当前|该|此|本|同一(?:个)?|通用|默认|任意|不涉及|没有关联的?|已选的?|项目的|如何|一般|普通|通常|所有|本地|现有的?|已有的?|不同的?|(?:一个|新|每|各)个?|the|a|an|our|my|current|this|that|existing|different)$/iu.test(owner[1].trim())
+      && !/(?:做|搭|来|准备|写|要)?(?:一|一份|一个)?个(?:新(?:的)?)?$/u.test(owner[1])) return true;
+    if (classifier.test(left) || namespace.test(rest)) continue;
+    // A bare proper identifier before “项目/工作区” is also an address, even
+    // if the user omits the location verb (“Ghost 项目…”).
+    if (/^[A-Z][A-Za-z\d_.-]*$/u.test(left) && !/^(?:Create|New|Plan|Design|Manage|Existing|General|Current)$/iu.test(left)) return true;
+    // Prefix style: “使用项目 Ghost”, “workspace Foo”. Do not interpret
+    // “做个项目计划” / “搭一个新项目” as requests to enter unknown roots.
+    if (locationVerb.test(left) || !left) {
+      if (/^(?:[A-Za-z\d][\w./\\-]*|[\p{Script=Han}]{2,16})(?:\s|[，。；;！!？?]|$)/u.test(right)
+        && !/^(?:里|内|中|的|上|下|去|做|写|修|如何|有哪|怎么|是否|一般|通常|没有|管理|需要|计划|模板|排期|是什|\b(?:is|are|does|in|for|to|with|that|and|or|of|plan|template|management|name|structure)\b)/iu.test(right)) return true;
+    }
+    if (/^(?:未知|外部|陌生|未授权|未选中?|unknown|outside)$/iu.test(left)) return true;
+  }
+  return false;
+}
+
 // Resolve only allowlisted exact directory strings. A name merely being a substring
 // of a different project/path does not select it; equal names can be ambiguous.
-export function scopeFor(text, cat) {
+export function scopeFor(text, cat, {auto=false}={}) {
   // Reserve an internal placeholder; literal user text cannot impersonate an allowlist hit.
   const matched = new Set(); let marked = text.replaceAll('@target@','@literal@'), unknownPath = false;
   const roots = new Set(cat.roots.keys()); if (cat.general) roots.add(cat.general);
@@ -87,21 +140,27 @@ export function scopeFor(text, cat) {
   // Be conservative on explicit standalone filesystem targets even if the verb
   // is in another clause. URLs/routes in a conceptual question aren't cwd.
   const fsText=marked.replace(/https?:\/\/[^\s，。；]+/giu,' ');
-  if (actionable(fsText) && !isGeneral(fsText) && /(?:^|[\s：:=(（])(?:\/(?!\/)|~\/|\.\.\/|[A-Za-z]:[\\/]|\\\\)[^\s，。；)）]+/u.test(fsText)) unknownPath=true;
+  // Writing a list *from* /outside is still an I/O target, not a generic
+  // writing exemption. Only a purely conceptual mention gets no authority.
+  const inertPath=isGeneral(fsText,{auto}) && /解释|介绍|科普|什么是|是什么|为什么|如何理解|原理|\b(?:explain|what (?:is|are|does)|how (?:do|does)|why (?:is|does))\b/iu.test(fsText)
+    && !/(?:把|将|从|参照|参考|基于|读取|打开|复制|修改|处理|提取|使用|\b(?:use|read|open|from|copy|edit))\s*(?:\/|~\/|\.\.?\/|[A-Za-z]:[\\/]|\\\\)/iu.test(fsText);
+  if ((auto ? !inertPath : actionable(fsText) && !isGeneral(fsText)) && /(?:^|[\p{Script=Han}\s：:=(（])(?:\/(?!\/)|~\/|\.\.?\/|[A-Za-z]:[\\/]|\\\\)[^\s，。；)）]+/u.test(fsText)) unknownPath=true;
   if (unknownPath) return {paths:[],error:'提到了未选定或不完全相同的目录；请在设置中选择该精确目录，或改指已选项目'};
   const entries = [...cat.roots].flatMap(([path,names]) => [...names].map(name=>({path,name}))).sort((a,b)=>b.name.length-a.name.length);
   // Find all occurrences before replacing each name, so duplicated names remain ambiguous.
   for (const name of new Set(entries.map(p=>p.name))) {
     const re = new RegExp(boundary(name), 'giu');
-    if (!re.test(marked)) continue;
+    const hits=[...marked.matchAll(re)];
+    if (!hits.length || (auto && incidentalName.test(name) && !hits.some(m=>addressedName(marked,m.index,m[0].length)))) continue;
     const applicable = entries.filter(p=>p.name.toLowerCase()===name.toLowerCase());
     const anchored=applicable.filter(p=>precise.has(p.path));
     for (const p of anchored.length ? anchored : applicable) matched.add(p.path);
     marked=marked.replace(re, ' @target@ ');
   }
+  if (auto && autoScopeConflict(marked)) return {paths:[...matched],error:'明确的目标不在已选目录中，或有排除/冲突目标；请指定唯一的已授权工作区'};
   if (/(?:不要|不用|不在|别在|不是|不是在|不发到|排除)\s*(?:项目|仓库|工程|目录)?\s*@target@|@target@\s*(?:以外|之外|除外)/u.test(marked)) return {paths:[...matched],error:'请求排除或否定了某个候选项目，请明确实际要发送的唯一目录'};
   if (/(?:[a-zA-Z][\w.-]*|[\p{Script=Han}]{1,16})\s*(?:和|及|与|或者?|还是)\s*@target@\s*(?:项目|仓库|工程)|@target@\s*(?:还是|或(?:者)?|和|与)\s*[^，。；\s@]+\s*(?:项目|仓库|工程)/u.test(marked)) return {paths:[...matched],error:'这项提到了其他未确认的项目，请明确唯一的目标'};
-  for (const m of marked.matchAll(/项目|仓库|工程/gu)) {
+  if (!auto) for (const m of marked.matchAll(/项目|仓库|工程/gu)) {
     const left = marked.slice(Math.max(0,m.index-32),m.index).trimEnd();
     const right = marked.slice(m.index+m[0].length,m.index+m[0].length+32).trimStart();
     if (/(?:不涉及|不指定|通用|没有关联的?|无)$/u.test(left)) continue;
@@ -110,8 +169,9 @@ export function scopeFor(text, cat) {
     if (/^周报|^进度|^汇报/u.test(right) && !/(?:在|给|为|对)[^，；]{1,12}$/u.test(left)) continue;
     return {paths:[...matched],error:'提到的项目未能唯一对应到已选目录；请指明项目名或选定它的精确目录'};
   }
-  if (/(?:这个|当前|本|该|此)(?:项目|仓库|工程)/u.test(marked) && !matched.size) {
-    if(cat.roots.size===1 && actionable(text) && projectWork(text)) return {paths:[...cat.roots.keys()],deictic:true};
+  if (/(?:这个|当前|本|该|此)(?:项目|仓库|工程|工作区|目录)|\b(?:this|current) (?:workspace|project|repository)\b/iu.test(marked) && !matched.size) {
+    if(cat.roots.size===1 && (auto || actionable(text) && projectWork(text))) return {paths:[...cat.roots.keys()],deictic:true};
+    if(auto && cat.roots.size>1) return {paths:[],deictic:true};
     return {paths:[],error:'尚未指明“这个项目”是哪一个；请点名已选项目或精确目录'};
   }
   if (matched.size>1) return {paths:[...matched],error:'整段请求同时指向多个已选目录；请为这条消息选择唯一的目标目录'};
@@ -150,23 +210,29 @@ const genericGrams=new Set('修复 排查 实现 开发 新增 添加 优化 修
 const joint=(a,b)=>[...a].filter(v=>b.has(v));
 const setMatches=(s,re)=>new Set(s.match(re)??[]);
 const sig={
-  ticket:/\b[a-z][a-z\d_]*-\d+\b|#\d+\b/giu,
+  ticket:/\b[a-z][a-z\d_]*-\d+[a-z\d]*\b|#\d+\b/giu,
   file:/(?:[\w.-]+[\\/])*[\w.-]+\.(?:[cm]?[jt]sx?|md|py|go|css|json|java|rs|sql|vue|yml|yaml|html|toml|xml|csv|sh|tsx|log)\b/giu,
   status:/\b[45]\d\d\b/gu,
   date:/(?:\d{4}[-/.年])?\d{1,2}[-/.月]\d{1,2}日?|\d{4}年|\d{1,2}月|(?:周|星期)[一二三四五六日天]|\b(?:jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|aug(?:ust)?|sep(?:tember)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\s+\d{1,2}\b/giu,
   // One submission target per link. Extract from the ORIGINAL string so a
   // case-sensitive path or query stays distinct; end at prose punctuation.
-  url:/https?:\/\/[^\s"'<>「」『』（）()【】\[\]，。；、：！？]+/gu,
+  url:/https?:\/\/[^\s"'<>「」『』（）()【】\[\]，。；、：！？]+/giu,
   named:/[「“『"\x60]([^「“『"\x60」”』\n]{1,72})[」”』"\x60]/gu,
 };
 // Scheme and host are case-insensitive; the rest of a URL is not.
 function normalizeUrl(u) {
   const m=/^(https?):\/\/([^/?#]+)(.*)$/iu.exec(u);
-  return m ? m[1].toLowerCase()+'://'+m[2].toLowerCase()+m[3] : u;
+  if (!m) return u;
+  // Never lower-case userinfo, the path, query or fragment.
+  const at=m[2].lastIndexOf('@')+1;
+  return m[1].toLowerCase()+'://'+m[2].slice(0,at)+m[2].slice(at).toLowerCase()+m[3];
 }
 function facts(s) {
+  const url=new Set([...s.matchAll(sig.url)].map(m=>normalizeUrl(m[0])));
+  // A query string such as ?ticket=BILL-31 is not a SECOND source of
+  // independent evidence. Its exact bytes are already accounted for above.
+  s=s.replace(sig.url,' ');
   const t=s.normalize('NFKC').toLowerCase(),q=[...t.matchAll(sig.named)].map(m=>m[1].trim()).filter(Boolean);
-  const url=new Set([...s.matchAll(sig.url)].map(m=>normalizeUrl(m[0].replace(/[.,;:!?]+$/u,''))));
   const dates=setMatches(t,sig.date);
   // Relative dates referring to the earlier conversation (昨天的发版检查) are
   // not deliverable dates; contrasting dates, when BOTH present, still disagree.
@@ -176,37 +242,68 @@ function facts(s) {
   const position=setMatches(t,/标题|按钮|页脚|页眉|正文|侧栏|\b(?:heading|footer|header|sidebar|button)\b/giu);
   const ops=/改(?:成|为)|写成|替换(?:成|为)|\breplace\b/u.test(t);
   const namedWork=new Set([...t.matchAll(/《([^《》\n]{4,70})》/gu)].map(m=>m[1].trim()));
-  return {namedWork,ticket:setMatches(t,sig.ticket),file:setMatches(t,sig.file),date:dates,status:setMatches(t,sig.status),version,env,position,quoted:new Set(q),swap:ops&&q.length>=2?q.slice(-2):null,
-    url};
+  // Slotted object identifiers supplement tickets without interpreting arbitrary
+  // numbers as an address. Preserve case in file names and identifier values.
+  const record=new Set([...s.matchAll(/(?:工单(?:号)?|票号|单号|发票号|订单号|岗位(?:号|编号)|职位(?:号|编号)|批次号|\b(?:ticket|issue|invoice|order|job|batch)\s*(?:id|no\.?|number|#))\s*[:：=#-]?\s*([A-Z\d][\w.-]{0,47})/giu)].map(m=>m[1]).filter(v=>/\d/u.test(v)));
+  const owner=new Set([...s.matchAll(/(?:给|替|向|为|投递(?:到|给)?)\s*([\p{Script=Han}]{2,16}(?:公司|部门|团队|供应商)|[a-z][\w.-]{0,30}\s*(?:公司|团队|部门))/giu)].map(m=>m[1]));
+  for(const m of s.matchAll(/(?:客户|用户|供应商|部门|设备|账户|岗位|批次)\s*(?:编号|ID|号)?\s*[:：#]?\s*([a-z\d][\w.-]{0,32}|[甲乙丙丁戊己庚辛壬癸](?=\s|的|在|上|$))/giu)) owner.add(m[1]);
+  const symbols=new Set([...s.matchAll(/\b[a-zA-Z][a-zA-Z\d]*(?:_[a-zA-Z\d]+)*\b/gu)].map(m=>m[0]).filter(w=>/[a-z][A-Z]|[a-zA-Z]_[a-zA-Z]/u.test(w)));
+  for(const period of t.match(/(?:20\d\d年?)?第?[一二三四1-4]季度|\b(?:20\d{2}[- ]?)?q[1-4]\b/giu)??[]) dates.add(period);
+  return {namedWork,ticket:setMatches(t,sig.ticket),file:setMatches(s,sig.file),date:dates,status:setMatches(t,sig.status),version,env,position,quoted:new Set(q),swap:ops&&q.length>=2?q.slice(-2):null,
+    url,record,owner,symbols};
 }
 const distinct=(a,b)=>a.size && b.size && (a.size!==b.size || joint(a,b).length!==a.size);
-const compareFacts=(a,b)=>['ticket','file','date','status','version','env','position','quoted','namedWork','url'].some(k=>distinct(a[k],b[k])) || (a.swap && b.swap && a.swap.some((v,i)=>v!==b.swap[i]));
+const compareFacts=(a,b)=>['ticket','file','date','status','version','env','position','quoted','namedWork','url','record','owner','symbols'].some(k=>distinct(a[k],b[k])) || (a.swap && b.swap && a.swap.some((v,i)=>v!==b.swap[i]));
 const oppositeActions=[[/导入/u,/导出/u],[/登录/u,/登出|退出登录/u],[/增加|添加|新增|\badd\b/u,/删除|移除|\b(?:remove|delete)\b/u],[/启用|开启|\benable\b/u,/停用|禁用|关闭|\bdisable\b/u],[/超时/u,/重复|权限|乱码/u],[/登录/u,/注册/u],[/买入/u,/卖出/u],[/升级/u,/降级/u]];
 const actor=/(?:订单|库存|发票|商品|会员|购物车|用户|客户|供应商|商家|支付|物流|退款)(?=(?:[的\s]*)(?:导出|导入|数据|接口|记录|报表|汇总|模块|列表|金额|状态|缓存|功能|邮件|计划|报告|周报|操作|页面|统计|日结|日报))/gu;
 function differentObject(a,b) {
   if (distinct(setMatches(a,actor),setMatches(b,actor))) return true;
   return oppositeActions.some(([p,q])=> (p.test(a) && !q.test(a) && q.test(b) && !p.test(b)) || (p.test(b) && !q.test(b) && q.test(a) && !p.test(a)));
 }
+const noMatch=(conflict=false)=>({strong:false,supported:false,conflict,concrete:false,score:0});
+// Symptoms and deliverable facets are independent of workspace/domain words.
+// A CamelCase object or a file *and* the same fault can identify a paraphrase;
+// just sharing a filename, technology, workflow, or error code cannot.
+const facets=[/小数(?:点|位)|精度|舍入|四舍五入|\b(?:rounding|precision|decimal places?)\b/iu,
+  /乱码|字符编码|\b(?:mojibake|garbled|character encoding)\b/iu, /超时|\btime[ -]?out\b/iu,
+  /死锁|\bdeadlock\b/iu, /错别字|错字|拼写|\b(?:typo|misspell(?:ed|ing)?)\b/iu,
+  /溢出|越界|\b(?:overflow|out of bounds)\b/iu, /重复(?:扣款|收费)|\bdouble charg(?:e|ing)\b/iu,
+  /白屏|空白屏幕|\bblank screen\b/iu, /丢帧|掉帧|\bdropped frames?\b/iu];
+const facetSet=s=>new Set(facets.map((re,i)=>re.test(s)?i:null).filter(i=>i!==null));
+const separateWork=/(?:不同(?:功能|目标|任务)|另一(?:件事|个(?:问题|需求|对象|岗位)|项工作)|(?:换(?:一)?个|另(?:外)?[一1]个|新(?:的)?)(?:话题|需求|事项|任务)|不(?:是|接着)上次|\b(?:new|separate|different) (?:topic|task|request|work item)\b)/iu;
+const applyAction=/投递|投简历|网申|报名|应聘|递交|申请|\b(?:apply|applied|submit(?:ted)? (?:a |the )?(?:resume|application))\b/iu;
+const notApply=/撤回|撤销|取消|删除|查询|查看|进度|状态|结果|修改|更新|替换|\b(?:cancel|withdraw|status|check|update|change)\b/iu;
 export function similarity(request, source, cat) {
-  if(!source || !request) return {strong:false,score:0};
+  if(!source || !request) return noMatch();
   const {visible,opaque}=workEvidence(request),{visible:prior,opaque:other}=workEvidence(source);
   // Hiding code/quoted examples must not make two DIFFERENT payloads look
   // like the same job merely because both say “fix this sample”.
-  if (opaque.length && other.length && (opaque.length!==other.length || opaque.some((s,i)=>s!==other[i]))) return {strong:false,score:0};
-  const a=normal(visible,cat),b=normal(prior,cat), fa=family(a),fb=family(b), agree=fa && fa===fb;
+  if (opaque.length && other.length && (opaque.length!==other.length || opaque.some((s,i)=>s!==other[i]))) return noMatch(true);
+  const a=normal(visible.replace(sig.url,' '),cat),b=normal(prior.replace(sig.url,' '),cat), fa=family(a),fb=family(b), agree=fa && fa===fb;
   const ag=grams(a),bg=grams(b),overlap=joint(ag,bg), subject=overlap.filter(g=>!genericGrams.has(g));
   const af=facts(visible),bf=facts(prior),tickets=joint(af.ticket,bf.ticket),files=joint(af.file,bf.file),codes=joint(af.status,bf.status);
   // Quoted replacements, files, dates and URLs can rule OUT a match. But an
   // example mentioning a ticket/session is not affirmative evidence to reuse it.
   const rawA=visible===request?af:facts(request),rawB=prior===source?bf:facts(source);
-  if (compareFacts(rawA,rawB) || differentObject(a,b) || (fa && fb && fa!==fb) || /不同(?:功能|目标|任务)|另一(?:件事|个问题|个需求|项工作)|不(?:是|接着)上次/u.test(visible)) return {strong:false,score:0};
+  const afx=facetSet(a),bfx=facetSet(b),sameFacet=joint(afx,bfx).length>0;
+  if (compareFacts(rawA,rawB) || differentObject(a,b) || (afx.size && bfx.size && !sameFacet) || separateWork.test(visible)) return noMatch(true);
+  if (fa && fb && fa!==fb) {
+    // “开发笔记” vs “修复…” is simply uninformative, not a hard veto on a
+    // journal/excerpt for that row. Different goals ON a common object are.
+    return noMatch(Boolean(tickets.length || files.length || codes.length || sameFacet || subject.length>=2 || joint(af.url,bf.url).length || joint(af.symbols,bf.symbols).length));
+  }
+  // If one source doesn't name the object, that's ABSENCE, not a veto on a
+  // different independent source (e.g. an untitled native row + its journal).
+  // But it must NOT prove the identity of a URL submission, order or ticket.
+  if (['url','record','ticket'].some(k=>Boolean(af[k].size)!==Boolean(bf[k].size))) return noMatch();
   // The same complete application target plus the same kind of action is the
   // same work even when the wording differs. A query/cancel request about the
   // same link is NOT: the action must stay in the apply family on both sides.
-  const applyAction=/投递|网申|报名|应聘|递交|申请/u, notApply=/撤回|撤销|取消|删除|查询|查看|进度|状态|结果|修改|更新|替换/u;
-  if (af.url.size===1 && bf.url.size===1 && joint(af.url,bf.url).length===1
-    && applyAction.test(visible) && applyAction.test(prior)
-    && !notApply.test(visible) && !notApply.test(prior)) return {strong:true,score:6,urlSame:true};
+  if (af.url.size && (applyAction.test(a) || applyAction.test(b))) {
+    const applyA=applyAction.test(a) && !notApply.test(a),applyB=applyAction.test(b) && !notApply.test(b);
+    if (applyA!==applyB) return noMatch(true);
+    if (applyA && af.url.size===1 && joint(af.url,bf.url).length===1) return {strong:true,supported:true,conflict:false,concrete:true,score:106,urlSame:true};
+  }
   const x=a.replace(/\s+/gu,'').replace(/^(?:先在|在|为|给|对|跟进)/u,'').replace(/^(?:昨天|前天|刚才)/u,''),y=b.replace(/\s+/gu,'').replace(/^(?:在|为|给|对)/u,'').replace(/^(?:昨天|前天|刚才)/u,'');
   const exact=x===y && x.length>=4 && ((agree && subject.length) || (x.length>=8 && subject.length>=3));
   const sameEdit=files.length && rawA.swap && rawB.swap && (joint(af.env,bf.env).length || subject.length>=3);
@@ -216,10 +313,13 @@ export function similarity(request, source, cat) {
   const near=agree && ratio>=0.67 && subject.length>=3 && (files.length || !af.file.size && !bf.file.size);
   const named=agree && [...af.namedWork,...bf.namedWork].some(v=>v.length>=5 && (af.namedWork.has(v) || visible.toLowerCase().includes(v)) && (bf.namedWork.has(v) || prior.toLowerCase().includes(v)));
   const unmatchedLiteral=Boolean(opaque.length)!==Boolean(other.length);
-  const strong=Boolean((!unmatchedLiteral || tickets.length || files.length || codes.length || named) && (tickets.length || named || exact || sameEdit || contained || sameStatus || near));
-  const concrete=Boolean(named || tickets.length || files.length || codes.length || x.length>=10 && y.length>=10 && subject.length>=4);
-
-  return {strong,concrete,score:(strong?100:0)+(subject.length?subject.length*2+overlap.length:Math.min(2,overlap.length))+files.length*3+codes.length*2};
+  const record=joint(af.record,bf.record).length>0, symbol=joint(af.symbols,bf.symbols).length>0;
+  const typedObject=Boolean(files.length || symbol || record),independentFacet=Boolean(typedObject && sameFacet);
+  const concrete=Boolean(named || tickets.length || typedObject || codes.length || x.length>=10 && y.length>=10 && subject.length>=4);
+  const strong=Boolean((!unmatchedLiteral || tickets.length || typedObject || codes.length || named) &&
+    (tickets.length || named || exact || sameEdit || contained || sameStatus || near || independentFacet && agree));
+  const supported=strong || Boolean(!unmatchedLiteral && (independentFacet || record && agree));
+  return {strong,supported,conflict:false,concrete,score:(strong?100:0)+(subject.length?subject.length*2+overlap.length:Math.min(2,overlap.length))+files.length*3+codes.length*2+(supported?3:0)};
 }
 
 // Project identity is not conversation identity. A distinctive module, full file

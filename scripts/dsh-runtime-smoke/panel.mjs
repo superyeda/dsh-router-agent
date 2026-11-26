@@ -4,6 +4,7 @@ import { readFile } from 'node:fs/promises'
 import { panelDOM } from './panel-dom.mjs'
 import { checkRouting } from './routing.mjs'
 import { checkLedger } from './ledger.mjs'
+import { checkAutomatic } from './automatic.mjs'
 
 // Run the exact distributed factory in the SAME JS realm as Cordis. Its React
 // component merely passes the DOM root to connectRouter; drive that registered
@@ -113,6 +114,14 @@ export async function checkProductionPanel({client, Service, host, endpoints, ca
       await submit(production, false, 'mount')
       await submit(production, false, 'remount')
       return
+    }
+    if(process.env.DSH_SMOKE_PHASE==='automatic') {
+      const manifest=new URL('./legacy-automatic.json',import.meta.url);let old
+      if(existsSync(manifest)) {
+        const {name,version}=JSON.parse(await readFile(manifest,'utf8'));assert.equal(name,'dsh-router-agent');assert.equal(version,'0.2.0')
+        old=await loadBundle('legacy-automatic')
+      }
+      await checkAutomatic({host,native:client.remote,production,old,withPanel,routing,endpoints,cwd,provider});return
     }
     const oldRouter = new URL('./legacy-routing.json', import.meta.url)
     let legacyRouting

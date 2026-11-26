@@ -1,4 +1,5 @@
 // The preview and the sender use the same model policy. IDs are data, never markup or URLs.
+import { isRouteMode } from '../core/route-mode.mjs';
 import { modelMode, resolveTiers } from '../core/models.mjs';
 export const TIERS = [
   ['fast', '快速', '短问答、整理，以及意图分类'],
@@ -60,7 +61,7 @@ export function directoryOptions(rows, generalDir = '') {
   return [...dirs].map(([value, label]) => ({value, label}));
 }
 export function copySettings(v = {}) {
-  return {modelMode:v?.modelMode==null?modelMode(v || {}):str(v.modelMode), autoProvider:str(v?.autoProvider),
+  return {routingMode:v?.routingMode==null ? 'auto' : str(v.routingMode),modelMode:v?.modelMode==null?modelMode(v || {}):str(v.modelMode), autoProvider:str(v?.autoProvider),
     sessionMode:v?.sessionMode==null ? 'standard' : str(v.sessionMode),
     defaultProject:str(v?.defaultProject), generalDir:str(v?.generalDir), projects:list(v?.projects).map(p => ({path:str(p?.path), name:str(p?.name)})),
     tiers:Object.fromEntries(TIERS.map(([k]) => { const t = v?.tiers?.[k]; return [k, {provider:str(t?.provider), model:str(t?.model), effort:str(t?.effort)}]; }))};
@@ -100,6 +101,7 @@ export function checkSettings(value, models, catalog=models) {
     seen.add(pathKey(p.path)); p.name = p.name.trim() || shortDir(p.path);
   }
   if (data.defaultProject && !data.projects.some(p=>p.path===data.defaultProject)) return {field:'defaultProject',error:'默认项目不在已添加的项目目录中，请重新选择或留空。'};
+  if (!isRouteMode(data.routingMode)) return {field:'routingMode',error:'未知的工作区与会话路由策略，请重新选择。'};
   if (!['auto','manual'].includes(data.modelMode)) return {field:'modelMode',error:'未知模型策略，请选择自动或手动。'};
   if (!SESSION_MODES.has(data.sessionMode)) return {field:'sessionMode',error:'新会话模式不可用，请明确选择当前支持的预设或跟随 DSH 默认。'};
   const preview=previewModels(data,models,catalog);

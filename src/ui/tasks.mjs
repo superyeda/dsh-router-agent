@@ -1,4 +1,4 @@
-import { TIERS, STATUS, SESSION_MODES, modelLabel, str, list, statusOf, matchesFilter, recordStatus, recordCaption, candidateAt, pairKey, options, text, val, msg, order, shortcut } from './shared.mjs';
+import { TIERS, STATUS, SESSION_MODES, modelLabel, str, list, statusOf, matchesFilter, recordStatus, recordCaption, candidateAt, pairKey, shortDir, options, text, val, msg, order, shortcut } from './shared.mjs';
 import { canRemoveTask } from '../core/record-policy.mjs';
 
 import { createEmptyRecovery } from './recovery.mjs';
@@ -252,6 +252,10 @@ export function createTask(ctx,id) {
     const notes=[], roots=children.filter(i=>!i.parentItemId), follows=children.length-roots.length;
     if(ctx.filter && !node.hidden && ctx.filter!==status) notes.push('含'+STATUS.get(ctx.filter)[0]+'项');
     if(children.some(i=>i.recoverableEmpty===true)) notes.push('可核对空会话恢复');
+    if(task.kind==='conversation' && roots.length===1 && ['create','reuse'].includes(roots[0].decision) && roots[0].project) {
+      const i=roots[0], name=list(ctx.state.settings?.projects).find(p=>p.path===i.project)?.name || (i.project===ctx.state.settings?.generalDir?'通用目录':shortDir(i.project));
+      notes.push((i.decision==='reuse'?'续接':'新建')+' · '+name);
+    }
     if(roots.length>1) notes.push(roots.length+' 个历史分项');
     if(follows) notes.push(follows+' 条追问');
     if(children.length>1) notes.push(children.filter(i=>i.status==='done').length+'/'+children.length+' 已完成');

@@ -129,6 +129,19 @@ test('部分原提供方不可用时保留其余两档的真实预览；不完�
   submit(control(f.root,'新会话模型分配'));assert.equal(f.calls.length,0);assert.ok(alert(f.root,/标准.*没有可用的模型/));f.dispose();
 });
 
+test('旧设置默认自动决定工作区与会话；可选谨慎模式且不改目录/模型/预设',async()=>{
+  const s=uiState(),f=fixture(s),original=structuredClone(s.settings);assert.ok(note(f.root,'自动选工作区'));
+  settings(f.root);const select=control(f.root,'工作区与会话路由');assert.equal(select.value,'auto');assert.deepEqual(f.calls,[]);
+  fill(select,'confirm');assert.ok(note(f.root,'停在「待选择」'));submit(select);await settle();
+  assert.equal(s.settings.routingMode,'confirm');assert.deepEqual(s.settings.tiers,original.tiers);assert.deepEqual(s.settings.projects,original.projects);
+  assert.ok(note(f.root,'不确定时先请你选择'));settings(f.root);assert.equal(select.value,'confirm');
+  fill(select,'auto');submit(select);await settle();assert.equal(validateSettings(s.settings,s.catalog).routingMode,'auto');
+  for(const bad of ['manual','retired','__proto__']) {
+    assert.throws(()=>validateSettings({...s.settings,routingMode:bad},s.catalog),/路由策略/);
+    assert.equal(checkSettings({...s.settings,routingMode:bad},catalogEntries(s.catalog)).field,'routingMode');
+  }
+  f.dispose();
+});
 test('默认项目只列已添加且合法的项目，可留空；改动或移除对应路径后清空',async()=>{
   const f=fixture();settings(f.root);const select=control(f.root,'未指名项目时的默认项目');
   assert.deepEqual(select.children.map(o=>o.value),['','/web']);fill(select,'/docs');assert.equal(f.calls.length,0);
@@ -306,6 +319,12 @@ const record=(state,id,items,text=id,createdAt=1736000000000)=>{
 const selectRecord=(root,id)=>find(rowFor(root,id),n=>n.tag==='button' && n.getAttribute('data-action'));
 const side=root=>find(root,n=>n.tag==='aside' && n.getAttribute('aria-label')==='原会话侧栏');
 
+test('不展开记录也看得见本次新建或续接和实际工作区',()=>{
+  const s=uiState();record(s,'one',[item('create','done',{decision:'create',project:'/web'})]);
+  record(s,'two',[item('reuse','queued',{decision:'reuse',project:'/general'})]);
+  const f=fixture(s);assert.match(selectRecord(f.root,'one').textContent,/新建 · 站点/);assert.match(selectRecord(f.root,'two').textContent,/续接 · 通用目录/);
+  assert.equal(btn(rowFor(f.root,'one'),'展开详情').getAttribute('aria-expanded'),'false');f.dispose();
+});
 test('历史默认只呈现时间、状态和摘要；一段原文只展开一份，追问、结果和旧交接均可核对',()=>{
   const s=uiState(), raw='检查网站和文档\n  保持格式 '+ '长'.repeat(145), a=item('base','done',{text:raw,result:'完整结果 <b>不解释为 HTML</b>'});
   record(s,'new',[a,item('follow','running',{parentItemId:'base',accepted:true})],raw,1750000000000);

@@ -90,8 +90,8 @@ async function main() {
   // Use the installed standard preset row definitions, not guessed configs.
   // The full web/stdio profile demands network/tool providers; none are booted.
   const {entryListSchema} = await pkg('cordis-plugin-include')
-  const ledger = process.env.DSH_SMOKE_PHASE==='ledger'
-  const routePhase = ledger || ['routing','routing-cold'].includes(process.env.DSH_SMOKE_PHASE)
+  const ledger = process.env.DSH_SMOKE_PHASE==='ledger', automatic=process.env.DSH_SMOKE_PHASE==='automatic'
+  const routePhase = automatic || ledger || ['routing','routing-cold'].includes(process.env.DSH_SMOKE_PHASE)
   const {load} = req('js-yaml'), enabled = new Set(['persona','agent-instructions','time-context','tool-todo'])
   const presets = await Promise.all((routePhase ? ['standard','ptc'] : ['standard']).map(async id => {
     const filename = req.resolve('@deepseek-ai/dsh-web-app/presets/' + id + '.patch.yml')
@@ -108,7 +108,7 @@ async function main() {
     ['session-projection'], ['session-persistence-jsonl', {root: join(home, 'sessions')}],
     ['system-prompt', {includeRuntimeContext: false, includeHarnessIdentity: false}],
     ['tools'], ['tool-executor-native'], ['agent'], ['agent-loop', {agents: []}],
-    ['agent-default-model', {provider, model: defaultModel}], ['fs-local'], ['working-directory'],
+    ['agent-default-model', {provider, model: automatic ? routing.models.standard : defaultModel}], ['fs-local'], ['working-directory'],
     ['storage'], ['storage-json', {root: join(home, 'storage')}], ['storage-domain', {backend: 'json'}],
     ['workspace'], ['agent-preset-registry', {default:'standard', ...(routePhase ? {selectedDefault:'ptc'} : {})}], ...presets.map(preset => ['agent-preset',preset]),
     // Same sandbox policy, executor, approval and Agent creation listener as
@@ -176,7 +176,7 @@ async function main() {
   stage='install stock Session / Workspace clients'
   const installDesktop=await installStockSessions({client,host,req,pkg})
   if (routePhase) {
-    stage = ledger ? 'single delivery / compact journal / original live Session pane' : 'three-tier production form / repeat-work session / independent presets'
+    stage = automatic ? 'default automatic routing / accepted-context continuity / scope' : ledger ? 'single delivery / compact journal / original live Session pane' : 'three-tier production form / repeat-work session / independent presets'
     await checkProductionPanel({client, Service, host, endpoints, calls, provider, cwd, defaultModel, targetModel, replyText, routing, installDesktop, streams})
     return
   }

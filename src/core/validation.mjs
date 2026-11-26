@@ -1,3 +1,4 @@
+import { isRouteMode } from './route-mode.mjs';
 import { TIER_NAMES } from './journal.mjs';
 import { modelMode, resolveTiers } from './models.mjs';
 
@@ -30,6 +31,8 @@ export function validateSettings(raw, catalog) {
     seen.add(path); return {name,path};
   });
   if(raw.modelMode!=null && !['auto','manual'].includes(raw.modelMode)) throw Error('请选择自动或手动模型策略。');
+  const routingMode=raw.routingMode ?? 'auto';
+  if(!isRouteMode(routingMode)) throw Error('请选择有效的工作区和会话路由策略。');
   const mode=modelMode(raw),sessionMode=creationMode(raw.sessionMode);
   const autoProvider=raw.autoProvider || '';
   if(typeof autoProvider!=='string' || (mode==='auto' && autoProvider && !catalog.some(m=>m.provider===autoProvider))) throw Error('自动提供方不在当前模型目录，请重新选择。');
@@ -51,7 +54,7 @@ export function validateSettings(raw, catalog) {
   }
   const defaultProject=raw.defaultProject ? directory(raw.defaultProject) : '';
   if(defaultProject && !seen.has(defaultProject)) throw Error('默认项目必须是当前明确添加的项目目录。');
-  return {projects, generalDir: directory(raw.generalDir), defaultProject,modelMode:mode,sessionMode,...(autoProvider?{autoProvider}:{}),tiers};
+  return {projects, generalDir: directory(raw.generalDir), defaultProject,routingMode,modelMode:mode,sessionMode,...(autoProvider?{autoProvider}:{}),tiers};
 }
 export function message(raw, max = 8000) {
   const s = String(raw ?? '').trim();

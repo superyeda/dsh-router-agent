@@ -25,6 +25,7 @@ export function routingModels() {
   const gate = Promise.withResolvers(), entered = Promise.withResolvers()
   return {models, observations, gate, entered, active:false, holdFirst:false,
     async respond({model, messages, tools}) {
+      if (this.autoResponder) return this.autoResponder({model,messages,tools})
       // DSH appends time-context and other notice messages with role=user.
       // Inspect only the latest synthetic task; never mistake a notice for it.
       const human = messages.filter(m => m.role === 'user').flatMap(m => m.content ?? []).filter(b=>b.type==='text').map(b=>b.text)

@@ -1,3 +1,4 @@
+import { ROUTE_MODES, isRouteMode } from '../core/route-mode.mjs';
 import { SESSION_MODES, shortDir, copySettings, checkSettings, directoryOptions, options, text, val, msg, order } from './shared.mjs';
 import { createModelEditor } from './model-settings.mjs';
 
@@ -9,19 +10,19 @@ export function createSettings(ctx) {
   top.append(heading,topline);
   const grid = el('div','rt-settings-grid'), dirs=el('section','rt-card'), tiers=el('section','rt-card');
   const general = el('input'); general.placeholder='/Users/me/Work/general'; general.autocomplete='off'; general.spellcheck=false;
-  const knownGeneral=el('select'), knownProject=el('select'), defaultProject=el('select');
+  const knownGeneral=el('select'), knownProject=el('select'), defaultProject=el('select'), routeMode=el('select'), routeHint=el('p','rt-muted');
   const knownGeneralField=field('或从已知工作区填入通用目录',knownGeneral);
   const knownProjectField=field('从已知工作区添加项目',knownProject);
   const projectList=el('div','rt-projects'), projectRows=new Map(), fields=new Map();
   const emptyProjects=el('p','rt-muted','尚未添加项目。只使用通用目录也可以开始。');
   const add = button('＋ 手动添加项目目录',() => addRow({name:'',path:''}));
-  const dirHint=el('p','rt-muted','不要求已有会话。请填写当前 DSH 主机上不含 . 或 .. 的绝对路径。非项目的写作、问答可用通用目录；项目归属不明会先询问。');
-  dirs.append(el('p','rt-eyebrow','01 / 目录'),el('h3','','任务可以去哪里'),dirHint,field('通用目录（必填）',general),knownGeneralField,
+  const dirHint=el('p','rt-muted','只会在以下已授权的目录中选择。可手填 DSH 主机上的精确绝对路径，不要求已有会话。');
+  dirs.append(el('p','rt-eyebrow','01 / 目录'),el('h3','','任务可以去哪里'),field('工作区与会话路由',routeMode),routeHint,dirHint,field('通用目录（必填）',general),knownGeneralField,
     el('hr'),el('h4','','项目目录'),el('p','rt-muted','项目名用于匹配任务；留空时使用目录名。'),knownProjectField,projectList,emptyProjects,add,el('hr'),field('未指名项目时的默认项目',defaultProject),
-    el('p','rt-muted','仅用于没有项目线索的独立项目任务。留空则无法判断时询问；不覆盖通用问答、明确目标或有冲突的候选会话。'));
+    el('p','rt-muted','默认项目只用于兜底，不覆盖点名的目标或有充分线索的项目。通用问答、写作优先使用通用目录。'));
   const unavailable=live();
   tiers.append(el('p','rt-eyebrow','02 / 执行档位'),el('h3','','按任务选择模型'),
-    el('p','rt-muted','按任务复杂度选档，只使用 DSH 当前可用的模型与思考强度。意图分类使用「快速」档；不可用时用保守规则。'),unavailable);
+    el('p','rt-muted','按任务复杂度选档，只使用 DSH 当前可用的模型与思考强度。意图分类使用「快速」档；不可用时仍按所选的本地路由策略判断。'),unavailable);
   const editor=createModelEditor(ctx,draft,()=>{changed();update();});
   const preset=el('select'), modeBox=el('section','rt-creation-mode');
   modeBox.append(el('h4','','创建预设'),el('p','rt-muted','仅用于新会话，不改动任何已有会话或 DSH 全局默认。预设与模型档位、权限审批相互独立。所选预设不可用时停止，不会悄悄换成另一种模式。'),field('新会话模式',preset));
@@ -37,6 +38,7 @@ export function createSettings(ctx) {
   form.addEventListener('submit',e=>{e.preventDefault(); saveDraft();});
   general.addEventListener('input',()=>{draft().value.generalDir=general.value; changed();});
   knownGeneral.addEventListener('change',()=>{ if (knownGeneral.value) {draft().value.generalDir=knownGeneral.value; changed(); update(); general.focus();} });
+  routeMode.addEventListener('change',()=>{if(isRouteMode(routeMode.value)){draft().value.routingMode=routeMode.value;changed();update();}});
   defaultProject.addEventListener('change',()=>{
     const v=draft().value,path=defaultProject.value;
     if(!path || directoryOptions(v.projects).some(row=>row.value===path)){v.defaultProject=path;changed();}
@@ -66,8 +68,8 @@ export function createSettings(ctx) {
     const entries=directoryOptions(v.projects); const removed=v.defaultProject && !entries.some(e=>e.value===v.defaultProject);
     if(removed && clearRemoved) v.defaultProject='';
     else if(removed) entries.push({value:v.defaultProject,label:v.defaultProject+'（已不在项目中）',disabled:true});
-    options(defaultProject,entries,v.defaultProject,'留空 · 无法判断时询问');fields.set('defaultProject',defaultProject);
-    if(removed && clearRemoved) msg(feedback,'原默认项目已不在项目目录中，现已清空；无法判断时会询问。');
+    options(defaultProject,entries,v.defaultProject,v.routingMode==='auto'?'留空 · 使用自动兜底':'留空 · 无法判断时询问');fields.set('defaultProject',defaultProject);
+    if(removed && clearRemoved) msg(feedback,'原默认项目已不在项目目录中，现已清空。');
   }
   function rowView(row) {
     const box=el('div','rt-project-row'); const name=el('input'),path=el('input'); path.spellcheck=false;
@@ -105,6 +107,10 @@ export function createSettings(ctx) {
       r.remove.setAttribute('aria-label','移除项目 '+(row.name || row.path || (i+1))); return r.box;
     });
     order(projectList,nodes); for (const row of projectRows.keys()) if (!value.projects.includes(row)) projectRows.delete(row);
+    const routes=Object.entries(ROUTE_MODES).map(([value,label])=>({value,label}));
+    if(!isRouteMode(value.routingMode)) routes.push({value:value.routingMode,label:'未知路由策略（请重新选择）',disabled:true});
+    options(routeMode,routes,value.routingMode);fields.set('routingMode',routeMode);
+    text(routeHint,value.routingMode==='auto'?'有同一工作的依据就续接，否则自动选择目录新建。项目任务缺少线索时，使用默认项目；未设默认则使用项目列表首项。目标冲突、没有获准目录或找不到所指的旧会话时才需要选择。':'仍自动处理明确的目标；项目或旧会话证据不足时，停在「待选择」。');
     updateDefaultProject(value);editor.update(value,fields);
     const modes=[...SESSION_MODES].map(([value,label])=>({value,label}));
     if(!SESSION_MODES.has(value.sessionMode)) modes.push({value:value.sessionMode,label:(value.sessionMode || '空值')+'（当前不支持）',disabled:true});

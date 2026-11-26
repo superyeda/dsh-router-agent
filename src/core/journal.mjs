@@ -4,7 +4,7 @@ const VERSION = 1;
 export const STORAGE_KEY = 'dsh.router-agent.journal.v1';
 export const TIER_NAMES = ['fast', 'standard', 'deep'];
 export function emptyDocument() {
-  return { version: VERSION, settings: { projects: [], generalDir: '', defaultProject:'', modelMode:'auto', sessionMode:'standard', tiers: Object.fromEntries(TIER_NAMES.map(k => [k, {provider:'', model:'', effort:''}])) }, tasks: [] };
+  return { version: VERSION, settings: { projects: [], generalDir: '', defaultProject:'', routingMode:'auto', modelMode:'auto', sessionMode:'standard', tiers: Object.fromEntries(TIER_NAMES.map(k => [k, {provider:'', model:'', effort:''}])) }, tasks: [] };
 }
 function decode(raw) {
   if (raw === null) return emptyDocument();

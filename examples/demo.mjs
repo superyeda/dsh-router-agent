@@ -2,7 +2,7 @@
 import { createRouter } from '../src/core/controller.mjs';
 import { memoryJournal } from '../src/core/journal.mjs';
 import { mountRouter } from '../src/ui/main.mjs';
-const projects=[{name:'A',path:'/demo/A'},{name:'B',path:'/demo/B'}];
+const projects=[{name:'发布工具',path:'/demo/A'},{name:'账单核算',path:'/demo/B'}];
 const pre=[{id:'demo-release',cwd:'/demo/A',title:'A 项目发版检查',updatedAt:Date.now(),busy:true}];
 const catalog=[{provider:'demo',model:'swift',efforts:['low']},{provider:'demo',model:'work',efforts:['medium']},{provider:'demo',model:'reason',efforts:['high']}];
 const byCreate=new Map(), work=new Map();

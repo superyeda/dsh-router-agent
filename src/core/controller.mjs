@@ -1,7 +1,7 @@
 import { planRequest } from '../planner/index.mjs';
 import { emptyDocument } from './journal.mjs';
 import { expectedRecoveryId } from '../host/contract.mjs';
-import { acceptedWork } from './routing-context.mjs';
+import { acceptedWork, reserveRouteOrder } from './routing-context.mjs';
 import { candidateAt, canRemoveTask, isCompletedTask } from './record-policy.mjs';
 import { resolveTiers } from './models.mjs';
 import { permitted, checkTier, validateSettings, materialize, message, excerpt, creationMode } from './validation.mjs';
@@ -62,7 +62,7 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
   async function roster() {
     const allowed = permitted(doc.settings);
     try {
-      const work=acceptedWork(doc.tasks,allowed);
+      const work=acceptedWork(doc.tasks,allowed,doc.routeClock);
       sessions=(await adapter.listSessions([...allowed],work.bindings)).filter(s=>allowed.has(s.cwd));connected=true;
       return work;
     }
@@ -119,7 +119,7 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
     }
     if(changed) change();
   }
-  async function dispatch(item, confirmedEmptySessionId=null) {
+  async function dispatch(item, confirmedEmptySessionId=null, batch) {
     try {
       allowedProject(item); ensureLive(); item.status='dispatching'; item.error=''; delete item.errorCode; item.retryable=false; change();
       if(item.decision==='create') {
@@ -139,6 +139,7 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
       }
       // Write target, text, cursor and request ID *before* admission, including retries.
       item.payload ??= item.approved ? item.handoff : item.text;
+      reserveRouteOrder(doc,item,now(),batch);
       item.attempted=true; change(); ensureLive();
       await adapter.deliver(item.sessionId,item.requestId,item.payload);
       item.accepted=true; item.status='queued'; item.error=''; item.retryable=false; change();
@@ -163,8 +164,8 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
     // Compatibility only: keep the identities and approval gates of records
     // persisted by 0.1.x; never convert or replay them as new conversations.
     advance(task);
-    const ready=task.items.filter(x=>x.status==='new');
-    async function worker() { let i; while ((i=ready.shift())) { ensureLive(); await dispatch(i); } }
+    const ready=task.items.filter(x=>x.status==='new'), batch=ready.length>1?{}:null;
+    async function worker() { let i; while ((i=ready.shift())) { ensureLive(); await dispatch(i,null,batch); } }
     await Promise.all(Array.from({length:Math.min(4,ready.length)},worker));
   }
   async function observe(item) {
@@ -176,7 +177,7 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
     const status=reading.status, result=excerpt(reading.result,capResult), error=excerpt(reading.error,900);
     // Retry only an indeterminate admission, never replay a failed/completed agent turn.
     const retryable=status==='unknown' && !item.accepted && !!item.attempted;
-    if (item.status===status && (item.result||'')===result && (item.error||'')===error && !!item.retryable===retryable) return;
+    if (item.status===status && (item.result||'')===result && (item.error||'')===error && !!item.retryable===retryable && (status==='unknown' || item.accepted===true)) return;
     Object.assign(item,{status,result,error,retryable});
     if(['queued','running','input-required','done','failed'].includes(status)) item.accepted=true;
     change();
@@ -207,7 +208,7 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
     const recent=async sid=>{if(!sessions.some(s=>s.id===sid)) throw Error('候选会话不在许可范围。');return adapter.recent(sid);};
     const classify=!infer?undefined:async data=>{
       try{return await infer({...data,...checkTier(effective.tiers.fast,catalog)});}
-      catch(e){notice='意图模型不可用，本次使用保守规则：'+detail(e);throw e;}
+      catch(e){notice='意图模型不可用，本次使用本地路由规则：'+detail(e);throw e;}
     };
     const planned=await plan({text:input,settings:structuredClone(effective),sessions:work.forPlan(structuredClone(sessions)),getRecent:recent,infer:classify});
     return {effective,planned};
@@ -240,6 +241,12 @@ export function createRouter({adapter, journal, infer, plan=planRequest, id=()=>
     // Publish the smaller list only after storage accepted it. No native call:
     // this is not a cancel, an archive, or a deleteSession operation.
     const next={...doc,tasks};
+    if(doc.routeClock===undefined) {
+      // v0.2.0 has no watermark. Removing one of several admitted targets must
+      // not make the remaining one appear to be the last conversation. Keep no ID.
+      const keep=new Set(tasks);
+      if(doc.tasks.some(t=>!keep.has(t) && t.items.some(i=>i.accepted || i.attempted))) next.routeClock=0;
+    }
     try { journal.write(next); } catch(e) {storageFailure=e;throw e;}
     doc=next;emit();
   }
